@@ -6,6 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      tag_name:
+        description: 'Release tag name (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
       mpv_version:
         description: 'mpv git tag or branch to build'
         required: true
@@ -62,7 +66,7 @@ jobs:
           # Full package (engine + libmpv + transitive dependencies)
           cp build/bin/audio-engine staging/full/
           cp -P build/libmpv/linux/* staging/full/ || true
-          tar -czf dist/audio-engine-linux-x64-full.tar.gz -C staging/full .
+          tar -czf dist/audio-engine-linux-x64.tar.gz -C staging/full .
 
           # Slim package (engine + libmpv only)
           cp build/bin/audio-engine staging/slim/
@@ -78,7 +82,7 @@ jobs:
           path: dist/
 
   build-macos:
-    name: Build macOS (arm64 Apple Silicon)
+    name: Build macOS (arm64 Apple Silicon) & iOS
     runs-on: macos-14
     steps:
       - name: Checkout repository
@@ -107,16 +111,80 @@ jobs:
           # Full package
           cp build/bin/audio-engine staging/full/
           cp -P build/libmpv/darwin/* staging/full/ || true
-          tar -czf dist/audio-engine-darwin-arm64-full.tar.gz -C staging/full .
+          tar -czf dist/audio-engine-macos-arm64.tar.gz -C staging/full .
 
           # Slim package
           cp build/bin/audio-engine staging/slim/
           cp -P build/libmpv/darwin/libmpv*.dylib* staging/slim/ || true
-          tar -czf dist/audio-engine-darwin-arm64-slim.tar.gz -C staging/slim .
+          tar -czf dist/audio-engine-macos-arm64-slim.tar.gz -C staging/slim .
 
-          cd dist && shasum -a 256 *.tar.gz > sha256-darwin.txt
+      - name: Build iOS BBeBeeAudioBridge.xcframework
+        run: |
+          mkdir -p build/ios/headers build/ios/device build/ios/sim-arm64 build/ios/sim-x86_64 build/ios/sim
+          cp engine/ios/BBeBeeAudioBridge.h build/ios/headers/
+          cat << 'EOF' > build/ios/headers/module.modulemap
+module BBeBeeAudioBridge {
+    header "BBeBeeAudioBridge.h"
+    export *
+}
+EOF
 
-      - name: Upload macOS Assets
+          IPHONEOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          IPHONESIM_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+
+          echo "=== Compiling iOS Device (arm64) ==="
+          xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "${IPHONEOS_SDK}" \
+            -miphoneos-version-min=15.0 -std=c++17 -fobjc-arc \
+            -Iengine \
+            -c engine/pcm_ring_buffer.cpp -o build/ios/device/pcm_ring_buffer.o
+          xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "${IPHONEOS_SDK}" \
+            -miphoneos-version-min=15.0 -std=c++17 -fobjc-arc \
+            -Iengine \
+            -c engine/ios/BBeBeeAudioBridge.mm -o build/ios/device/BBeBeeAudioBridge.o
+          libtool -static -o build/ios/device/libBBeBeeAudioBridge.a \
+            build/ios/device/pcm_ring_buffer.o build/ios/device/BBeBeeAudioBridge.o
+
+          echo "=== Compiling iOS Simulator (arm64) ==="
+          xcrun --sdk iphonesimulator clang++ -arch arm64 -isysroot "${IPHONESIM_SDK}" \
+            -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+            -Iengine \
+            -c engine/pcm_ring_buffer.cpp -o build/ios/sim-arm64/pcm_ring_buffer.o
+          xcrun --sdk iphonesimulator clang++ -arch arm64 -isysroot "${IPHONESIM_SDK}" \
+            -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+            -Iengine \
+            -c engine/ios/BBeBeeAudioBridge.mm -o build/ios/sim-arm64/BBeBeeAudioBridge.o
+          libtool -static -o build/ios/sim-arm64/libBBeBeeAudioBridge.a \
+            build/ios/sim-arm64/pcm_ring_buffer.o build/ios/sim-arm64/BBeBeeAudioBridge.o
+
+          echo "=== Compiling iOS Simulator (x86_64) ==="
+          xcrun --sdk iphonesimulator clang++ -arch x86_64 -isysroot "${IPHONESIM_SDK}" \
+            -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+            -Iengine \
+            -c engine/pcm_ring_buffer.cpp -o build/ios/sim-x86_64/pcm_ring_buffer.o
+          xcrun --sdk iphonesimulator clang++ -arch x86_64 -isysroot "${IPHONESIM_SDK}" \
+            -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+            -Iengine \
+            -c engine/ios/BBeBeeAudioBridge.mm -o build/ios/sim-x86_64/BBeBeeAudioBridge.o
+          libtool -static -o build/ios/sim-x86_64/libBBeBeeAudioBridge.a \
+            build/ios/sim-x86_64/pcm_ring_buffer.o build/ios/sim-x86_64/BBeBeeAudioBridge.o
+
+          echo "=== Creating Universal Simulator Library ==="
+          lipo -create build/ios/sim-arm64/libBBeBeeAudioBridge.a build/ios/sim-x86_64/libBBeBeeAudioBridge.a \
+            -output build/ios/sim/libBBeBeeAudioBridge.a
+
+          echo "=== Creating XCFramework ==="
+          rm -rf build/ios/BBeBeeAudioBridge.xcframework
+          xcodebuild -create-xcframework \
+            -library build/ios/device/libBBeBeeAudioBridge.a -headers build/ios/headers \
+            -library build/ios/sim/libBBeBeeAudioBridge.a -headers build/ios/headers \
+            -output build/ios/BBeBeeAudioBridge.xcframework
+
+          echo "=== Packaging iOS xcframework zip ==="
+          (cd build/ios && zip -rq ../../dist/audio-engine-ios.xcframework.zip BBeBeeAudioBridge.xcframework)
+
+          cd dist && shasum -a 256 * > sha256-macos.txt
+
+      - name: Upload macOS & iOS Assets
         uses: actions/upload-artifact@v4
         with:
           name: assets-macos
@@ -166,12 +234,12 @@ jobs:
           # Full package
           cp build/bin/audio-engine.exe staging/full/
           cp -r build/libmpv/win64/* staging/full/ || true
-          (cd staging/full && zip -r ../../dist/audio-engine-win32-x64-full.zip .)
+          (cd staging/full && zip -r ../../dist/audio-engine-windows-x64.zip .)
 
           # Slim package
           cp build/bin/audio-engine.exe staging/slim/
           cp build/libmpv/win64/libmpv-2.dll staging/slim/ || true
-          (cd staging/slim && zip -r ../../dist/audio-engine-win32-x64-slim.zip .)
+          (cd staging/slim && zip -r ../../dist/audio-engine-windows-x64-slim.zip .)
 
           cd dist && sha256sum *.zip > sha256-win32.txt
 
@@ -208,14 +276,15 @@ jobs:
 
       - name: Package Android Archives
         run: |
+          sudo apt-get update && sudo apt-get install -y zip
           mkdir -p dist
           for ABI in arm64-v8a x86_64; do
             STAGE="staging/android/${ABI}"
             mkdir -p "${STAGE}"
             cp "build/android/${ABI}/libbbebee_audio_jni.so" "${STAGE}/"
-            tar -czf "dist/audio-engine-android-${ABI}.tar.gz" -C "${STAGE}" .
+            (cd "${STAGE}" && zip -r "../../../dist/audio-engine-android-${ABI}.zip" .)
           done
-          cd dist && sha256sum *.tar.gz > sha256-android.txt
+          cd dist && sha256sum *.zip > sha256-android.txt
 
       - name: Upload Android Assets
         uses: actions/upload-artifact@v4
@@ -237,17 +306,18 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Generate Consolidated SHA256SUMS.txt
+      - name: Generate Consolidated SHA256SUMS
         run: |
           cd release-assets
-          rm -f sha256-*.txt SHA256SUMS.txt
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          rm -f sha256-*.txt SHA256SUMS SHA256SUMS.txt
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
+          tag_name: ${{ github.ref_name || github.event.inputs.tag_name || 'v1.0.0' }}
           files: release-assets/*
           draft: ${{ github.event.inputs.draft || false }}
           generate_release_notes: true
