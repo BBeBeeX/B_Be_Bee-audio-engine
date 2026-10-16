@@ -29,6 +29,4 @@ target_link_libraries(bbebee_audio_jni
 
 set_target_properties(bbebee_audio_jni PROPERTIES
     OUTPUT_NAME "bbebee_audio_jni"
-    VERSION 1.0.0
-    SOVERSION 1
 )

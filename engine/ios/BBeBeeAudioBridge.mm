@@ -5,6 +5,8 @@
 #include <vector>
 #include <atomic>
 #include <dlfcn.h>
+#include <algorithm>
+#include <cstring>
 
 #include "../mpv_client.h"
 #include "../pcm_ring_buffer.hpp"

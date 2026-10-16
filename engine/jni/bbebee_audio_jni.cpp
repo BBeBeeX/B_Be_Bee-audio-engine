@@ -4,6 +4,8 @@
 #include <dlfcn.h>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+#include <cstring>
 
 #define LOG_TAG "BBeBeeAudioJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
