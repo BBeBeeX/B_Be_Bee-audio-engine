@@ -37,7 +37,7 @@ public:
     bool isMpvAvailable() const { return mpvHandle_ != nullptr; }
     bool isPcmTapAvailable() const { return pcmTapRegistered_.load(); }
 
-    void onPcmChunk(const float* samples, size_t frames, int channels, int sampleRate);
+    void onPcmChunk(const float* samples, int frames, int channels, int sampleRate);
 
 private:
     mpv_handle* mpvHandle_{ nullptr };

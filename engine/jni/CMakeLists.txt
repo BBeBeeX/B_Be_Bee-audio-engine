@@ -17,13 +17,10 @@ add_library(bbebee_audio_jni SHARED
     ../pcm_ring_buffer.cpp
 )
 
-find_library(log-lib log)
-find_library(android-lib android)
-
 # Link against Android NDK core libraries and dl for dynamic loading of libmpv
 target_link_libraries(bbebee_audio_jni
-    ${log-lib}
-    ${android-lib}
+    log
+    android
     dl
 )
 

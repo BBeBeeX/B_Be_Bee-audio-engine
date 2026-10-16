@@ -20,7 +20,7 @@ typedef int (*mpv_command_fn)(mpv_handle*, const char**);
 typedef int (*mpv_set_option_string_fn)(mpv_handle*, const char*, const char*);
 typedef int (*mpv_set_property_string_fn)(mpv_handle*, const char*, const char*);
 typedef const char* (*mpv_error_string_fn)(int);
-typedef int (*mpv_set_pcm_callback_fn)(mpv_handle*, mpv_pcm_callback_fn, void*);
+typedef void (*mpv_set_pcm_callback_fn)(mpv_handle*, mpv_pcm_callback_fn, void*);
 
 static void* s_libmpvHandle = nullptr;
 static mpv_create_fn s_mpv_create = nullptr;
@@ -68,10 +68,10 @@ static bool loadIosMpvSymbols() {
     std::atomic<bool> _pcmTapRegistered;
     std::atomic<bool> _isPlaying;
 }
-- (void)onPcmFrames:(const float *)samples frames:(size_t)frames channels:(int)channels sampleRate:(int)sampleRate;
+- (void)onPcmFrames:(const float *)samples frames:(int)frames channels:(int)channels sampleRate:(int)sampleRate;
 @end
 
-static void iosPcmCallback(const float* data, size_t frames, int channels, int sample_rate, void* user_data) {
+static void iosPcmCallback(const float* data, int frames, int channels, int sample_rate, void* user_data) {
     if (user_data) {
         auto* bridge = (__bridge BBeBeeAudioBridge*)user_data;
         [bridge onPcmFrames:data frames:frames channels:channels sampleRate:sample_rate];
@@ -128,11 +128,9 @@ static void iosPcmCallback(const float* data, size_t frames, int channels, int s
     }
 
     if (s_mpv_set_pcm_callback) {
-        int tapErr = s_mpv_set_pcm_callback(_mpv, iosPcmCallback, (__bridge void*)self);
-        if (tapErr == 0) {
-            _pcmTapRegistered.store(true);
-            NSLog(@"[BBeBeeAudioBridge] libmpv PCM tap registered successfully on iOS.");
-        }
+        s_mpv_set_pcm_callback(_mpv, iosPcmCallback, (__bridge void*)self);
+        _pcmTapRegistered.store(true);
+        NSLog(@"[BBeBeeAudioBridge] libmpv PCM tap registered successfully on iOS.");
     }
 
     return self;
@@ -221,9 +219,9 @@ static void iosPcmCallback(const float* data, size_t frames, int channels, int s
     }
 }
 
-- (void)onPcmFrames:(const float *)samples frames:(size_t)frames channels:(int)channels sampleRate:(int)sampleRate {
-    if (_ringBuffer) {
-        _ringBuffer->write(samples, frames, channels, sampleRate);
+- (void)onPcmFrames:(const float *)samples frames:(int)frames channels:(int)channels sampleRate:(int)sampleRate {
+    if (_ringBuffer && frames > 0) {
+        _ringBuffer->write(samples, static_cast<size_t>(frames), channels, sampleRate);
     }
 }
 

@@ -26,7 +26,7 @@ typedef int (*mpv_command_fn)(mpv_handle*, const char**);
 typedef int (*mpv_set_option_string_fn)(mpv_handle*, const char*, const char*);
 typedef int (*mpv_set_property_string_fn)(mpv_handle*, const char*, const char*);
 typedef const char* (*mpv_error_string_fn)(int);
-typedef int (*mpv_set_pcm_callback_fn)(mpv_handle*, mpv_pcm_callback_fn, void*);
+typedef void (*mpv_set_pcm_callback_fn)(mpv_handle*, mpv_pcm_callback_fn, void*);
 
 static void* g_libmpvHandle = nullptr;
 static mpv_create_fn g_mpv_create = nullptr;
@@ -69,7 +69,7 @@ static bool loadLibmpvSymbols() {
     return true;
 }
 
-static void pcmCallbackTrampoline(const float* data, size_t frames, int channels, int sample_rate, void* user_data) {
+static void pcmCallbackTrampoline(const float* data, int frames, int channels, int sample_rate, void* user_data) {
     if (user_data) {
         auto* ctx = reinterpret_cast<AudioEngineContext*>(user_data);
         ctx->onPcmChunk(data, frames, channels, sample_rate);
@@ -122,14 +122,9 @@ bool AudioEngineContext::initialize(const std::string& configDir) {
     }
 
     if (g_mpv_set_pcm_callback) {
-        int tapErr = g_mpv_set_pcm_callback(mpvHandle_, pcmCallbackTrampoline, this);
-        if (tapErr == 0) {
-            pcmTapRegistered_.store(true);
-            LOGI("libmpv PCM tap registered successfully on Android");
-        } else {
-            pcmTapRegistered_.store(false);
-            LOGW("mpv_set_pcm_callback returned error code: %d", tapErr);
-        }
+        g_mpv_set_pcm_callback(mpvHandle_, pcmCallbackTrampoline, this);
+        pcmTapRegistered_.store(true);
+        LOGI("libmpv PCM tap registered successfully on Android");
     }
 
     LOGI("AudioEngineContext initialized successfully on Android");
@@ -213,9 +208,9 @@ void AudioEngineContext::setVolume(double volume) {
     }
 }
 
-void AudioEngineContext::onPcmChunk(const float* samples, size_t frames, int channels, int sampleRate) {
-    if (ringBuffer_) {
-        ringBuffer_->write(samples, frames, channels, sampleRate);
+void AudioEngineContext::onPcmChunk(const float* samples, int frames, int channels, int sampleRate) {
+    if (ringBuffer_ && frames > 0) {
+        ringBuffer_->write(samples, static_cast<size_t>(frames), channels, sampleRate);
     }
 }
 
