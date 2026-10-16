@@ -1,0 +1,186 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "name": "BBeBee-audio-engine-third-party-manifest",
+  "version": "1.0.0",
+  "description": "Exhaustive metadata and verification specification for third-party dynamic libraries across supported platforms",
+  "policy": {
+    "noBinaryInGit": true,
+    "distributionMode": "github-releases",
+    "releaseTag": "v1.0.0",
+    "hashAlgorithms": ["sha256", "md5"]
+  },
+  "platforms": {
+    "darwin-arm64": {
+      "architecture": "arm64",
+      "os": "darwin",
+      "note": "Apple Silicon (M-series) exclusively supported. Intel x64 dropped per Decision D1.",
+      "packages": {
+        "full": {
+          "archive": "audio-engine-darwin-arm64-full.tar.gz",
+          "itemCount": 3
+        },
+        "slim": {
+          "archive": "audio-engine-darwin-arm64-slim.tar.gz",
+          "itemCount": 3
+        }
+      },
+      "keyLibraries": [
+        {
+          "name": "libmpv.2.dylib",
+          "role": "Patched mpv audio playback core with PCM tap callback",
+          "md5": "89e1859c95a988fdf47bb29da75ec660",
+          "rpath": "@loader_path;@executable_path"
+        },
+        {
+          "name": "libmpv.dylib",
+          "role": "Compatibility symbolic link to libmpv.2.dylib",
+          "isSymlink": true,
+          "target": "libmpv.2.dylib"
+        }
+      ]
+    },
+    "linux-x64": {
+      "architecture": "x86_64",
+      "os": "linux",
+      "packages": {
+        "full": {
+          "archive": "audio-engine-linux-x64-full.tar.gz",
+          "itemCount": 214,
+          "description": "Full dependency closure including ffmpeg/avcodec, pulse, pipewire, alsa, and graphics stacks"
+        },
+        "slim": {
+          "archive": "audio-engine-linux-x64-slim.tar.gz",
+          "itemCount": 3,
+          "description": "Patched libmpv.so.2 and audio-engine only; relies on host system shared libraries"
+        }
+      },
+      "denylist": [
+        "linux-vdso.so.1",
+        "ld-linux-x86-64.so.2",
+        "libc.so.6",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libdl.so.2",
+        "librt.so.1",
+        "libresolv.so.2",
+        "libgcc_s.so.1",
+        "libstdc++.so.6"
+      ],
+      "keyLibraries": [
+        {
+          "name": "libmpv.so.2",
+          "role": "Patched mpv core shared object with PCM tap callback hook",
+          "md5": "dc746ce206c812a5bd84ac96531e7707",
+          "rpath": "$ORIGIN"
+        },
+        {
+          "name": "libasound.so.2",
+          "role": "ALSA audio output infrastructure",
+          "md5": "6aeaba120dd68c9f0eed26cf3ee947b4",
+          "rpath": "$ORIGIN"
+        },
+        {
+          "name": "libavcodec.so.60",
+          "role": "FFmpeg audio/video codecs",
+          "rpath": "$ORIGIN"
+        },
+        {
+          "name": "libpulse.so.0",
+          "role": "PulseAudio backend",
+          "rpath": "$ORIGIN"
+        },
+        {
+          "name": "libpipewire-0.3.so.0",
+          "role": "PipeWire modern Linux audio server backend",
+          "rpath": "$ORIGIN"
+        }
+      ]
+    },
+    "win32-x64": {
+      "architecture": "x86_64",
+      "os": "win32",
+      "packages": {
+        "full": {
+          "archive": "audio-engine-win32-x64-full.zip",
+          "itemCount": 116,
+          "description": "Full MinGW dependency closure without System32 collision DLLs"
+        },
+        "slim": {
+          "archive": "audio-engine-win32-x64-slim.zip",
+          "itemCount": 2,
+          "description": "audio-engine.exe and libmpv-2.dll only"
+        }
+      },
+      "prunedSystem32Libraries": [
+        "DWrite.dll",
+        "gdiplus.dll",
+        "AVICAP32.dll",
+        "MSVFW32.dll",
+        "MSIMG32.dll",
+        "USP10.dll",
+        "ncrypt.dll",
+        "bcryptprimitives.dll",
+        "msvcp_win.dll"
+      ],
+      "keyLibraries": [
+        {
+          "name": "libmpv-2.dll",
+          "role": "Patched mpv dynamic library with PCM tap hook (WASAPI output)",
+          "md5": "6e18221ba07c050aeaa757c39708369a"
+        },
+        {
+          "name": "zlib1.dll",
+          "role": "Decompression library",
+          "md5": "30a31b969a3356efde11078dc635baa0"
+        },
+        {
+          "name": "avcodec-63.dll",
+          "role": "FFmpeg codec library"
+        },
+        {
+          "name": "libass-9.dll",
+          "role": "Advanced Substation Alpha subtitle & text rendering"
+        }
+      ]
+    },
+    "android": {
+      "architectures": ["arm64-v8a", "x86_64"],
+      "os": "android",
+      "apiLevel": 26,
+      "packages": {
+        "arm64-v8a": {
+          "archive": "audio-engine-android-arm64-v8a.tar.gz"
+        },
+        "x86_64": {
+          "archive": "audio-engine-android-x86_64.tar.gz"
+        }
+      },
+      "keyLibraries": [
+        {
+          "name": "libbbebee_audio_jni.so",
+          "role": "JNI bridge between Android / React Native and audio engine"
+        },
+        {
+          "name": "libmpv.so",
+          "role": "OpenSL ES / AudioTrack mpv build for Android"
+        }
+      ]
+    },
+    "ios": {
+      "architectures": ["arm64", "x86_64"],
+      "os": "ios",
+      "minimumDeploymentTarget": "15.0",
+      "packages": {
+        "xcframework": {
+          "archive": "BBeBeeAudioEngine.xcframework.zip"
+        }
+      },
+      "keyLibraries": [
+        {
+          "name": "BBeBeeAudioBridge",
+          "role": "Objective-C++ bridge wrapping audio engine and libmpv AudioUnit backend"
+        }
+      ]
+    }
+  }
+}

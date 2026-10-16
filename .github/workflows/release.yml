@@ -1,0 +1,253 @@
+name: Release Audio Engine & Patched MPV
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      mpv_version:
+        description: 'mpv git tag or branch to build'
+        required: true
+        default: 'v0.41.0'
+      draft:
+        description: 'Publish as draft release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install build toolchain & dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build meson pkg-config patchelf python3 \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev libass-dev libplacebo-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libluajit-5.1-dev libuchardet-dev
+
+      - name: Build Patched libmpv
+        run: |
+          bash scripts/build-patched-mpv.sh linux "${{ github.event.inputs.mpv_version || 'v0.41.0' }}" build/libmpv/linux
+
+      - name: Build audio-engine binary
+        run: |
+          cmake -B build/engine -S engine -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/engine --config Release -j$(nproc)
+          mkdir -p build/bin
+          cp build/engine/audio-engine build/bin/
+
+      - name: Package Full and Slim Archives
+        run: |
+          mkdir -p staging/full staging/slim dist
+          
+          # Full package (engine + libmpv + transitive dependencies)
+          cp build/bin/audio-engine staging/full/
+          cp -P build/libmpv/linux/* staging/full/ || true
+          tar -czf dist/audio-engine-linux-x64-full.tar.gz -C staging/full .
+
+          # Slim package (engine + libmpv only)
+          cp build/bin/audio-engine staging/slim/
+          cp -P build/libmpv/linux/libmpv.so* staging/slim/ || true
+          tar -czf dist/audio-engine-linux-x64-slim.tar.gz -C staging/slim .
+
+          cd dist && sha256sum *.tar.gz > sha256-linux.txt
+
+      - name: Upload Linux Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-linux
+          path: dist/
+
+  build-macos:
+    name: Build macOS (arm64 Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies via Homebrew
+        run: |
+          brew update
+          brew install cmake ninja meson pkg-config ffmpeg libass libplacebo uchardet luajit
+
+      - name: Build Patched libmpv (arm64)
+        run: |
+          bash scripts/build-patched-mpv.sh macos "${{ github.event.inputs.mpv_version || 'v0.41.0' }}" build/libmpv/darwin
+
+      - name: Build audio-engine binary
+        run: |
+          cmake -B build/engine -S engine -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/engine --config Release -j$(sysctl -n hw.ncpu)
+          mkdir -p build/bin
+          cp build/engine/audio-engine build/bin/
+
+      - name: Package Full and Slim Archives
+        run: |
+          mkdir -p staging/full staging/slim dist
+
+          # Full package
+          cp build/bin/audio-engine staging/full/
+          cp -P build/libmpv/darwin/* staging/full/ || true
+          tar -czf dist/audio-engine-darwin-arm64-full.tar.gz -C staging/full .
+
+          # Slim package
+          cp build/bin/audio-engine staging/slim/
+          cp -P build/libmpv/darwin/libmpv*.dylib* staging/slim/ || true
+          tar -czf dist/audio-engine-darwin-arm64-slim.tar.gz -C staging/slim .
+
+          cd dist && shasum -a 256 *.tar.gz > sha256-darwin.txt
+
+      - name: Upload macOS Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-macos
+          path: dist/
+
+  build-windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-ffmpeg
+            mingw-w64-x86_64-libass
+            mingw-w64-x86_64-libplacebo
+            mingw-w64-x86_64-uchardet
+            mingw-w64-x86_64-luajit
+            zip
+
+      - name: Build Patched libmpv & audio-engine
+        shell: msys2 {0}
+        run: |
+          bash scripts/build-patched-mpv.sh windows "${{ github.event.inputs.mpv_version || 'v0.41.0' }}" build/libmpv/win64
+          cmake -B build/engine -S engine -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/engine --config Release
+          mkdir -p build/bin
+          cp build/engine/audio-engine.exe build/bin/
+
+      - name: Package Windows ZIP Archives
+        shell: msys2 {0}
+        run: |
+          mkdir -p staging/full staging/slim dist
+
+          # Full package
+          cp build/bin/audio-engine.exe staging/full/
+          cp -r build/libmpv/win64/* staging/full/ || true
+          (cd staging/full && zip -r ../../dist/audio-engine-win32-x64-full.zip .)
+
+          # Slim package
+          cp build/bin/audio-engine.exe staging/slim/
+          cp build/libmpv/win64/libmpv-2.dll staging/slim/ || true
+          (cd staging/slim && zip -r ../../dist/audio-engine-win32-x64-slim.zip .)
+
+          cd dist && sha256sum *.zip > sha256-win32.txt
+
+      - name: Upload Windows Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-windows
+          path: dist/
+
+  build-android:
+    name: Build Android JNI (arm64-v8a & x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+
+      - name: Compile JNI Libraries for Android ABIs
+        run: |
+          for ABI in arm64-v8a x86_64; do
+            echo "=== Compiling JNI bridge for ${ABI} ==="
+            BUILD_DIR="build/android/${ABI}"
+            cmake -B "${BUILD_DIR}" -S engine/jni \
+              -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="${ABI}" \
+              -DANDROID_PLATFORM=android-26 \
+              -DCMAKE_BUILD_TYPE=Release
+            cmake --build "${BUILD_DIR}" --config Release
+          done
+
+      - name: Package Android Archives
+        run: |
+          mkdir -p dist
+          for ABI in arm64-v8a x86_64; do
+            STAGE="staging/android/${ABI}"
+            mkdir -p "${STAGE}"
+            cp "build/android/${ABI}/libbbebee_audio_jni.so" "${STAGE}/"
+            tar -czf "dist/audio-engine-android-${ABI}.tar.gz" -C "${STAGE}" .
+          done
+          cd dist && sha256sum *.tar.gz > sha256-android.txt
+
+      - name: Upload Android Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-android
+          path: dist/
+
+  publish-release:
+    name: Publish Release & Aggregated Checksums
+    needs: [build-linux, build-macos, build-windows, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all platform assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate Consolidated SHA256SUMS.txt
+        run: |
+          cd release-assets
+          rm -f sha256-*.txt SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release-assets/*
+          draft: ${{ github.event.inputs.draft || false }}
+          generate_release_notes: true

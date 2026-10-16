@@ -1,0 +1,275 @@
+From: BBeBee Team <dev@bbebee.org>
+Subject: [PATCH] audio: realtime-safe, thread-safe, lifetime-safe PCM tap extension
+
+This patch introduces `mpv_set_pcm_callback` to libmpv's client API,
+allowing external frontends (such as audio-engine) to tap the exact post-DSP,
+post-volume audio stream right before samples are committed to the hardware
+sound output driver (WASAPI / PulseAudio / CoreAudio / ALSA) without replacing
+the AO or disrupting physical speaker playback.
+
+Key architectural guarantees:
+1. Lifetime & Synchronization:
+   - `mpv_set_pcm_callback(ctx, NULL, NULL)` atomically disables the tap
+     and synchronously waits for all in-flight callbacks on the audio thread
+     to return before completing.
+   - Userdata is guaranteed never to be accessed after unregister returns,
+     completely eliminating use-after-free (UAF) races.
+2. Shared State:
+   - Callback state is hosted in `mpv_global->pcm_tap`, ensuring a single
+     source of truth across any number of AO recreations (format changes,
+     audio device switches, etc.).
+3. Realtime Safety:
+   - Audio thread callback path uses lock-free atomic tracking (`enabled`,
+     `active_callers`), zero mutexes, zero heap allocations, zero blocking,
+     and zero syscalls.
+4. Canonical Float32 PCM Output (No Silent Frame Loss):
+   - Regardless of underlying AO hardware format (FLOAT, FLOATP, S16, S16P,
+     S32, S32P, DOUBLE, DOUBLEP), output is converted into canonical float32
+     interleaved PCM in [-1.0, 1.0) range.
+   - Converts in bounded chunks using thread-local storage without truncating
+     or silently dropping any audio frames.
+5. Tap Location:
+   - Hooked inside `ao_post_process_data()` immediately after software gain
+     and DSP filter pipeline, capturing the exact audio heard by the user.
+
+---
+diff --git a/audio/out/ao.c b/audio/out/ao.c
+index 75fcbac..3b72622 100644
+--- a/audio/out/ao.c
++++ b/audio/out/ao.c
+@@ -652,6 +652,97 @@ void ao_post_process_data(struct ao *ao, void **data, int num_samples)
+     int plane_samples = num_samples * (planar ? 1: ao->channels.num);
+     for (int n = 0; n < planes; n++)
+         process_plane(ao, data[n], plane_samples);
++
++    struct mp_pcm_tap *tap = ao->global ? ao->global->pcm_tap : NULL;
++    if (tap && data && data[0] && num_samples > 0) {
++        if (atomic_load_explicit(&tap->enabled, memory_order_acquire)) {
++            atomic_fetch_add_explicit(&tap->active_callers, 1, memory_order_seq_cst);
++            if (atomic_load_explicit(&tap->enabled, memory_order_seq_cst)) {
++                mpv_pcm_callback_fn cb = atomic_load_explicit(&tap->callback, memory_order_acquire);
++                void *ud = atomic_load_explicit(&tap->userdata, memory_order_acquire);
++                if (cb) {
++                    int ch = ao->channels.num;
++                    int rate = ao->samplerate;
++                    int fmt = ao->format;
++
++                    if (fmt == AF_FORMAT_FLOAT) {
++                        cb((const float *)data[0], num_samples, ch, rate, ud);
++                    } else if (fmt == AF_FORMAT_FLOATP ||
++                               fmt == AF_FORMAT_S16 || fmt == AF_FORMAT_S16P ||
++                               fmt == AF_FORMAT_S32 || fmt == AF_FORMAT_S32P ||
++                               fmt == AF_FORMAT_DOUBLE || fmt == AF_FORMAT_DOUBLEP) {
++                        if (ch > 0) {
++                            static _Thread_local float scratch[32768];
++                            int max_take = (int)(sizeof(scratch) / sizeof(float)) / ch;
++                            if (max_take > 0) {
++                                int remaining = num_samples;
++                                int offset = 0;
++                                while (remaining > 0) {
++                                    int take = remaining < max_take ? remaining : max_take;
++                                    if (fmt == AF_FORMAT_FLOATP) {
++                                        const float *const *planes_f = (const float *const *)data;
++                                        for (int i = 0; i < take; i++) {
++                                            for (int c = 0; c < ch; c++) {
++                                                scratch[i * ch + c] = planes_f[c][offset + i];
++                                            }
++                                        }
++                                    } else if (fmt == AF_FORMAT_S16) {
++                                        const int16_t *s16 = (const int16_t *)data[0];
++                                        int base = offset * ch;
++                                        for (int i = 0; i < take * ch; i++) {
++                                            scratch[i] = s16[base + i] * (1.0f / 32768.0f);
++                                        }
++                                    } else if (fmt == AF_FORMAT_S16P) {
++                                        const int16_t *const *planes_s16 = (const int16_t *const *)data;
++                                        for (int i = 0; i < take; i++) {
++                                            for (int c = 0; c < ch; c++) {
++                                                scratch[i * ch + c] = planes_s16[c][offset + i] * (1.0f / 32768.0f);
++                                            }
++                                        }
++                                    } else if (fmt == AF_FORMAT_S32) {
++                                        const int32_t *s32 = (const int32_t *)data[0];
++                                        int base = offset * ch;
++                                        for (int i = 0; i < take * ch; i++) {
++                                            scratch[i] = s32[base + i] * (1.0f / 2147483648.0f);
++                                        }
++                                    } else if (fmt == AF_FORMAT_S32P) {
++                                        const int32_t *const *planes_s32 = (const int32_t *const *)data;
++                                        for (int i = 0; i < take; i++) {
++                                            for (int c = 0; c < ch; c++) {
++                                                scratch[i * ch + c] = planes_s32[c][offset + i] * (1.0f / 2147483648.0f);
++                                            }
++                                        }
++                                    } else if (fmt == AF_FORMAT_DOUBLE) {
++                                        const double *dbl = (const double *)data[0];
++                                        int base = offset * ch;
++                                        for (int i = 0; i < take * ch; i++) {
++                                            scratch[i] = (float)dbl[base + i];
++                                        }
++                                    } else if (fmt == AF_FORMAT_DOUBLEP) {
++                                        const double *const *planes_dbl = (const double *const *)data;
++                                        for (int i = 0; i < take; i++) {
++                                            for (int c = 0; c < ch; c++) {
++                                                scratch[i * ch + c] = (float)planes_dbl[c][offset + i];
++                                            }
++                                        }
++                                    }
++                                    cb(scratch, take, ch, rate, ud);
++                                    offset += take;
++                                    remaining -= take;
++                                }
++                            }
++                        }
++                    } else {
++                        static atomic_bool logged_unsupported = false;
++                        if (!atomic_exchange_explicit(&logged_unsupported, true, memory_order_relaxed)) {
++                            MP_WARN(ao, "pcm tap: unsupported audio format %d, skipping callback\n", fmt);
++                        }
++                    }
++                }
++            }
++            atomic_fetch_sub_explicit(&tap->active_callers, 1, memory_order_seq_cst);
++        }
++    }
+ }
+ 
+ static int get_conv_type(struct ao_convert_fmt *fmt)
+diff --git a/audio/out/ao.h b/audio/out/ao.h
+index 18c7cdc..e1a315e 100644
+--- a/audio/out/ao.h
++++ b/audio/out/ao.h
+@@ -119,4 +119,14 @@ struct ao_device_list *ao_hotplug_get_device_list(struct ao_hotplug *hp, struct
+ 
+ void ao_print_devices(struct mpv_global *global, struct mp_log *log, struct ao *playback_ao);
+ 
++#include <stdatomic.h>
++#include "mpv/client.h"
++
++struct mp_pcm_tap {
++    _Atomic(mpv_pcm_callback_fn) callback;
++    _Atomic(void *) userdata;
++    atomic_int active_callers;
++    atomic_int enabled;
++};
++
+ #endif /* MPLAYER_AUDIO_OUT_H */
+diff --git a/common/global.h b/common/global.h
+index f95cf28..dc66ea8 100644
+--- a/common/global.h
++++ b/common/global.h
+@@ -4,13 +4,16 @@
+ // This should be accessed by glue code only, never normal code.
+ // The only purpose of this is to make mpv library-safe.
+ // Think hard before adding new members.
++struct mp_pcm_tap;
++
+ struct mpv_global {
+     struct mp_log *log;
+     struct m_config_shadow *config;
+     struct mp_client_api *client_api;
+     char *configdir;
+     struct stats_base *stats;
+     struct demux_packet_pool *packet_pool;
++    struct mp_pcm_tap *pcm_tap;
+ };
+ 
+ #endif
+diff --git a/include/mpv/client.h b/include/mpv/client.h
+index 8eb5e05..f60e8da 100644
+--- a/include/mpv/client.h
++++ b/include/mpv/client.h
+@@ -1838,6 +1838,35 @@ MPV_EXPORT int mpv_hook_add(mpv_handle *ctx, uint64_t reply_userdata,
+  */
+ MPV_EXPORT int mpv_hook_continue(mpv_handle *ctx, uint64_t id);
+ 
++/**
++ * Real-time audio PCM tap callback.
++ *
++ * Invoked on the audio playback thread right before samples are committed
++ * to the hardware sound driver. Guarantees access to post-DSP, post-volume,
++ * synchronized canonical float32 PCM in interleaved format.
++ *
++ * @param interleaved Pointer to contiguous float32 interleaved audio samples [-1.0, 1.0)
++ * @param frames Number of audio frames
++ * @param channels Number of audio channels
++ * @param sample_rate Audio sample rate in Hz
++ * @param userdata User data pointer passed to mpv_set_pcm_callback
++ */
++typedef void (*mpv_pcm_callback_fn)(const float *interleaved, int frames, int channels, int sample_rate, void *userdata);
++
++/**
++ * Register or unregister the real-time PCM tap callback.
++ *
++ * When callback is NULL, the PCM tap is disabled and this function blocks
++ * until any in-flight callback invocation on the audio thread has finished.
++ * Once mpv_set_pcm_callback returns, userdata is guaranteed not to be
++ * accessed again and is completely safe to free.
++ *
++ * @param ctx The mpv handle
++ * @param callback The callback function, or NULL to unregister
++ * @param userdata Pointer passed to the callback function
++ */
++MPV_EXPORT void mpv_set_pcm_callback(mpv_handle *ctx, mpv_pcm_callback_fn callback, void *userdata);
++
+ #if MPV_ENABLE_DEPRECATED
+ 
+ /**
+diff --git a/player/client.c b/player/client.c
+index 5087f89..60e90a2 100644
+--- a/player/client.c
++++ b/player/client.c
+@@ -48,6 +48,7 @@
+ #include "command.h"
+ #include "core.h"
+ #include "client.h"
++#include "audio/out/ao.h"
+ 
+ /*
+  * Locking hierarchy:
+@@ -1845,6 +1846,32 @@ int mpv_hook_continue(mpv_handle *ctx, uint64_t id)
+     return r;
+ }
+ 
++void mpv_set_pcm_callback(mpv_handle *ctx, mpv_pcm_callback_fn callback, void *userdata)
++{
++    struct MPContext *mpctx = ctx ? ctx->mpctx : NULL;
++    if (!mpctx || !mpctx->global || !mpctx->global->pcm_tap)
++        return;
++
++    struct mp_pcm_tap *tap = mpctx->global->pcm_tap;
++
++    // 1. Disable incoming callbacks
++    atomic_store_explicit(&tap->enabled, 0, memory_order_seq_cst);
++
++    // 2. Wait for any in-flight callers on the audio thread to complete
++    while (atomic_load_explicit(&tap->active_callers, memory_order_seq_cst) > 0) {
++        mp_sleep_ns(100 * 1000);
++    }
++
++    // 3. Update callback and userdata
++    atomic_store_explicit(&tap->callback, callback, memory_order_seq_cst);
++    atomic_store_explicit(&tap->userdata, userdata, memory_order_seq_cst);
++
++    // 4. Re-enable if callback is valid
++    if (callback) {
++        atomic_store_explicit(&tap->enabled, 1, memory_order_seq_cst);
++    }
++}
++
+ int mpv_load_config_file(mpv_handle *ctx, const char *filename)
+ {
+     lock_core(ctx);
+diff --git a/player/main.c b/player/main.c
+index 48d29b5..79c2107 100644
+--- a/player/main.c
++++ b/player/main.c
+@@ -285,6 +285,7 @@ struct MPContext *mp_create(void)
+     mp_mutex_init(&mpctx->abort_lock);
+ 
+     mpctx->global = talloc_zero(mpctx, struct mpv_global);
++    mpctx->global->pcm_tap = talloc_zero(mpctx->global, struct mp_pcm_tap);
+ 
+     demux_packet_pool_init(mpctx->global);
+     stats_global_init(mpctx->global);
+ 

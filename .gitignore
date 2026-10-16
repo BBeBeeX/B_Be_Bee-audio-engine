@@ -1,0 +1,69 @@
+# Build directories and outputs
+build/
+bin/
+dist/
+dist-*/
+out/
+output/
+staging/
+release-assets/
+target/
+
+# Dynamic and shared libraries (Zero Binary Policy)
+*.so
+*.so.*
+*.dll
+*.dylib
+*.dylib.*
+*.dylib.*.*
+*.a
+*.lib
+*.obj
+*.o
+*.exp
+*.ilk
+*.pdb
+
+# Executables
+*.exe
+*.out
+*.app
+audio-engine
+audio-engine.exe
+audio-engine-tests
+audio-engine-tests.exe
+
+# Archives and compressed bundles
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.rar
+*.xz
+*.bz2
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# CMake temporary files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Node & package manager artifacts
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
