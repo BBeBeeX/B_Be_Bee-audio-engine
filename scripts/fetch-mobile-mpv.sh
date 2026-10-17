@@ -153,7 +153,6 @@ stage_android() {
   local cached_so="${CACHE_DIR}/android_${abi}_libmpv.so"
 
   echo "--> Staging Android libmpv for ${abi}..."
-  mkdir -p "${OUTPUT_DIR}/android/${abi}"
 
   # 1. Download if custom URL provided
   local dl_url_var="MOBILE_MPV_ANDROID_${abi//-/_}_URL"
@@ -163,15 +162,21 @@ stage_android() {
     curl -fSL -o "${cached_so}" "${dl_url}" || true
   fi
 
-  # 2. Use cache or build verified binary
+  # 2. Use cache or build if stub explicitly allowed
   if [ -f "${cached_so}" ]; then
+    mkdir -p "${OUTPUT_DIR}/android/${abi}"
     cp "${cached_so}" "${target_so}"
-  else
+    echo "Verified Android ${abi} libmpv.so: ${target_so}"
+  elif [ "${MOBILE_MPV_ALLOW_STUB:-0}" = "1" ] || [ "${ALLOW_STUB:-0}" = "1" ]; then
+    echo "Notice: MOBILE_MPV_ALLOW_STUB=1 enabled. Compiling stub for Android ${abi}..."
+    mkdir -p "${OUTPUT_DIR}/android/${abi}"
     build_android_libmpv_stub "${abi}" "${target_so}"
     cp "${target_so}" "${cached_so}"
+    echo "Staged Android ${abi} libmpv.so (stub mode): ${target_so}"
+  else
+    echo "Notice: No real prebuilt libmpv.so found for Android ${abi} (MOBILE_MPV_ANDROID_URL not provided)."
+    echo "Skipping staging of stub libmpv.so to prevent false positives in audio bridge."
   fi
-
-  echo "Verified Android ${abi} libmpv.so: ${target_so}"
 }
 
 stage_ios() {
@@ -179,16 +184,30 @@ stage_ios() {
   local cached_fw="${CACHE_DIR}/mpv.framework"
 
   echo "--> Staging iOS mpv.framework..."
-  mkdir -p "${OUTPUT_DIR}/ios"
 
-  if [ -d "${cached_fw}" ]; then
-    cp -a "${cached_fw}" "${OUTPUT_DIR}/ios/"
-  else
-    build_ios_mpv_framework "${target_fw}"
-    cp -a "${target_fw}" "${CACHE_DIR}/"
+  local dl_url="${MOBILE_MPV_IOS_URL:-}"
+  if [ -n "${dl_url}" ] && [ ! -d "${cached_fw}" ]; then
+    echo "Downloading iOS mpv.framework from ${dl_url}..."
+    mkdir -p "${CACHE_DIR}/ios_dl"
+    if curl -fSL -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" "${dl_url}"; then
+      unzip -q -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" -d "${CACHE_DIR}/" || true
+    fi
   fi
 
-  echo "Verified iOS mpv.framework: ${target_fw}"
+  if [ -d "${cached_fw}" ]; then
+    mkdir -p "${OUTPUT_DIR}/ios"
+    cp -a "${cached_fw}" "${OUTPUT_DIR}/ios/"
+    echo "Verified iOS mpv.framework: ${target_fw}"
+  elif [ "${MOBILE_MPV_ALLOW_STUB:-0}" = "1" ] || [ "${ALLOW_STUB:-0}" = "1" ]; then
+    echo "Notice: MOBILE_MPV_ALLOW_STUB=1 enabled. Compiling stub for iOS mpv.framework..."
+    mkdir -p "${OUTPUT_DIR}/ios"
+    build_ios_mpv_framework "${target_fw}"
+    cp -a "${target_fw}" "${CACHE_DIR}/"
+    echo "Staged iOS mpv.framework (stub mode): ${target_fw}"
+  else
+    echo "Notice: No real prebuilt mpv.framework found for iOS (MOBILE_MPV_IOS_URL not provided)."
+    echo "Skipping staging of stub mpv.framework to prevent false positives in audio bridge."
+  fi
 }
 
 case "${PLATFORM}" in
@@ -229,15 +248,19 @@ fi
 
 (
   cd "${OUTPUT_DIR}"
-  find . -type f ! -name "SHA256SUMS*" -exec "${SHA256_CMD[@]}" {} + | sort -k 2 > "${CHECKSUMS_FILE}"
+  find . -type f ! -name "SHA256SUMS*" -exec "${SHA256_CMD[@]}" {} + | sort -k 2 > "${CHECKSUMS_FILE}" || true
 )
 
-echo "--- Mobile mpv Checksums ---"
-cat "${CHECKSUMS_FILE}"
-echo "----------------------------"
+if [ -s "${CHECKSUMS_FILE}" ]; then
+  echo "--- Mobile mpv Checksums ---"
+  cat "${CHECKSUMS_FILE}"
+  echo "----------------------------"
 
-echo "Validating mobile checksum integrity..."
-(cd "${OUTPUT_DIR}" && "${SHA256_CHECK[@]}" "${CHECKSUMS_FILE}")
-
-echo "Mobile mpv artifacts successfully staged and verified at ${OUTPUT_DIR}!"
+  echo "Validating mobile checksum integrity..."
+  (cd "${OUTPUT_DIR}" && "${SHA256_CHECK[@]}" "${CHECKSUMS_FILE}")
+  echo "Mobile mpv artifacts successfully staged and verified at ${OUTPUT_DIR}!"
+else
+  rm -f "${CHECKSUMS_FILE}"
+  echo "Notice: No mobile libmpv runtime binaries staged. Native bridge will operate in clean unbundled mode."
+fi
 

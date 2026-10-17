@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "name": "BBeBee-audio-engine-third-party-manifest",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Exhaustive metadata and verification specification for third-party dynamic libraries across supported platforms",
   "policy": {
     "noBinaryInGit": true,
     "distributionMode": "github-releases",
-    "releaseTag": "v1.0.0",
+    "releaseTag": "v1.2.0",
     "hashAlgorithms": ["sha256", "md5"]
   },
   "platforms": {
