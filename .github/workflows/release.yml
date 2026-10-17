@@ -113,6 +113,10 @@ jobs:
           cp -P build/libmpv/darwin/* staging/full/ || true
           tar -czf dist/audio-engine-macos-arm64.tar.gz -C staging/full .
 
+      - name: Build Genuine iOS mpv.framework
+        run: |
+          bash scripts/mpv-build/build-ios.sh staging/mobile-mpv/ios/mpv.framework
+
       - name: Build iOS BBeBeeAudioBridge.xcframework
         run: |
           bash scripts/fetch-mobile-mpv.sh ios
@@ -220,9 +224,20 @@ jobs:
             cmake --build "${BUILD_DIR}" --config Release
           done
 
+      - name: Install Android libmpv Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build meson pkg-config yasm nasm zip
+
+      - name: Build Genuine libmpv for Android ABIs
+        run: |
+          for ABI in arm64-v8a x86_64; do
+            echo "=== Compiling Genuine libmpv for ${ABI} ==="
+            bash scripts/mpv-build/build-android.sh "${ABI}" "staging/mobile-mpv/android/${ABI}"
+          done
+
       - name: Package Android Archives
         run: |
-          sudo apt-get update && sudo apt-get install -y zip
           bash scripts/fetch-mobile-mpv.sh android
           mkdir -p dist
           for ABI in arm64-v8a x86_64; do
@@ -230,9 +245,11 @@ jobs:
             mkdir -p "${STAGE}"
             SO_FILE=$(find "build/android/${ABI}" -name "libbbebee_audio_jni.so" | head -n 1)
             cp "${SO_FILE}" "${STAGE}/"
-            if [ -f "staging/mobile-mpv/android/${ABI}/libmpv.so" ]; then
-              cp "staging/mobile-mpv/android/${ABI}/libmpv.so" "${STAGE}/"
+            if [ ! -f "staging/mobile-mpv/android/${ABI}/libmpv.so" ]; then
+              echo "ERROR: Genuine libmpv.so missing for ${ABI}!" >&2
+              exit 1
             fi
+            cp "staging/mobile-mpv/android/${ABI}/libmpv.so" "${STAGE}/"
             (cd "${STAGE}" && zip -r "../../../dist/audio-engine-android-${ABI}.zip" .)
           done
           cd dist && sha256sum *.zip > sha256-android.txt

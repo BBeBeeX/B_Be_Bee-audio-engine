@@ -73,14 +73,18 @@ xcodebuild -create-xcframework \
   -output "${BUILD_DIR}/BBeBeeAudioBridge.xcframework"
 
 echo "=== Staging mpv framework support ==="
-if [ -d "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework" ]; then
-  cp -a "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework" "${BUILD_DIR}/"
+if [ ! -d "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework" ]; then
+  echo "mpv.framework not pre-staged; building via scripts/mpv-build/build-ios.sh..."
+  bash "${ROOT_DIR}/scripts/mpv-build/build-ios.sh" "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework"
 fi
 
-echo "=== Packaging iOS xcframework zip ==="
-if [ -d "${BUILD_DIR}/mpv.framework" ]; then
-  (cd "${BUILD_DIR}" && zip -rq "${DIST_DIR}/audio-engine-ios.xcframework.zip" BBeBeeAudioBridge.xcframework mpv.framework)
-else
-  (cd "${BUILD_DIR}" && zip -rq "${DIST_DIR}/audio-engine-ios.xcframework.zip" BBeBeeAudioBridge.xcframework)
+if [ ! -d "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework" ]; then
+  echo "ERROR: Genuine iOS mpv.framework not found and could not be built. Refusing to package incomplete archive." >&2
+  exit 1
 fi
+
+cp -a "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework" "${BUILD_DIR}/"
+
+echo "=== Packaging iOS xcframework zip ==="
+(cd "${BUILD_DIR}" && zip -rq "${DIST_DIR}/audio-engine-ios.xcframework.zip" BBeBeeAudioBridge.xcframework mpv.framework)
 echo "=== Created ${DIST_DIR}/audio-engine-ios.xcframework.zip ==="

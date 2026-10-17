@@ -18,196 +18,179 @@ echo "=========================================================="
 
 mkdir -p "${CACHE_DIR}" "${OUTPUT_DIR}"
 
-# Helper to create/provide Android libmpv.so with authentic exported symbols
-build_android_libmpv_stub() {
-  local abi="$1"
-  local dest_file="$2"
-  local dest_dir
-  dest_dir="$(dirname "${dest_file}")"
-  mkdir -p "${dest_dir}"
+verify_real_android_so() {
+  local so_file="$1"
+  local abi="$2"
 
-  local src_c="${CACHE_DIR}/libmpv_stub_${abi}.c"
-  cat << 'EOSRC' > "${src_c}"
-#include <stddef.h>
-#include <stdint.h>
-
-typedef void* mpv_handle;
-typedef void (*mpv_pcm_callback_fn)(const float* data, int frames, int channels, int sample_rate, void* user_data);
-
-#if defined(__GNUC__) || defined(__clang__)
-#define EXPORT __attribute__((visibility("default")))
-#else
-#define EXPORT
-#endif
-
-EXPORT mpv_handle mpv_create(void) { return (mpv_handle)0x1; }
-EXPORT int mpv_initialize(mpv_handle ctx) { (void)ctx; return 0; }
-EXPORT void mpv_destroy(mpv_handle ctx) { (void)ctx; }
-EXPORT int mpv_command(mpv_handle ctx, const char** args) { (void)ctx; (void)args; return 0; }
-EXPORT int mpv_set_option_string(mpv_handle ctx, const char* name, const char* data) { (void)ctx; (void)name; (void)data; return 0; }
-EXPORT int mpv_set_property_string(mpv_handle ctx, const char* name, const char* data) { (void)ctx; (void)name; (void)data; return 0; }
-EXPORT const char* mpv_error_string(int error) { (void)error; return "success"; }
-EXPORT void mpv_set_pcm_callback(mpv_handle ctx, mpv_pcm_callback_fn cb, void* user_data) { (void)ctx; (void)cb; (void)user_data; }
-EOSRC
-
-  local cc="${CC:-gcc}"
-  if ! command -v "${cc}" >/dev/null 2>&1; then
-    cc="clang"
+  if [ ! -f "${so_file}" ]; then
+    return 1
   fi
 
-  echo "Compiling verified libmpv.so for Android ${abi}..."
-  "${cc}" -shared -fPIC -O2 -Wl,-soname,libmpv.so "${src_c}" -o "${dest_file}"
-}
+  # Check that binary is authentic by verifying exported symbol count
+  local sym_count=0
+  if command -v nm >/dev/null 2>&1; then
+    sym_count=$(nm -D --defined-only "${so_file}" 2>/dev/null | wc -l || echo 0)
+    if [ "${sym_count}" -lt 50 ]; then
+      echo "ERROR: ${so_file} appears to be an invalid library (${sym_count} symbols)." >&2
+      return 1
+    fi
 
-# Helper to create/provide iOS mpv.framework
-build_ios_mpv_framework() {
-  local fw_dir="$1"
-  mkdir -p "${fw_dir}/Headers"
-
-  # Copy mpv client header
-  if [ -f "${ROOT_DIR}/engine/mpv_client.h" ]; then
-    cp "${ROOT_DIR}/engine/mpv_client.h" "${fw_dir}/Headers/client.h"
-  else
-    cat << 'EOSRC' > "${fw_dir}/Headers/client.h"
-#ifndef MPV_CLIENT_H_
-#define MPV_CLIENT_H_
-typedef void* mpv_handle;
-typedef void (*mpv_pcm_callback_fn)(const float* data, int frames, int channels, int sample_rate, void* user_data);
-#endif
-EOSRC
-  fi
-
-  # Create Info.plist
-  cat << 'EOSRC' > "${fw_dir}/Info.plist"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>mpv</string>
-    <key>CFBundleIdentifier</key>
-    <string>io.mpv.framework</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>mpv</string>
-    <key>CFBundlePackageType</key>
-    <string>FMWK</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.41.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-</dict>
-</plist>
-EOSRC
-
-  # Compile iOS mpv binary stub if libtool / cc available
-  local src_c="${CACHE_DIR}/libmpv_ios.c"
-  cat << 'EOSRC' > "${src_c}"
-#include <stddef.h>
-
-typedef void* mpv_handle;
-typedef void (*mpv_pcm_callback_fn)(const float* data, int frames, int channels, int sample_rate, void* user_data);
-
-#if defined(__GNUC__) || defined(__clang__)
-#define EXPORT __attribute__((visibility("default")))
-#else
-#define EXPORT
-#endif
-
-EXPORT mpv_handle mpv_create(void) { return (mpv_handle)0x1; }
-EXPORT int mpv_initialize(mpv_handle ctx) { (void)ctx; return 0; }
-EXPORT void mpv_destroy(mpv_handle ctx) { (void)ctx; }
-EXPORT int mpv_command(mpv_handle ctx, const char** args) { (void)ctx; (void)args; return 0; }
-EXPORT int mpv_set_option_string(mpv_handle ctx, const char* name, const char* data) { (void)ctx; (void)name; (void)data; return 0; }
-EXPORT int mpv_set_property_string(mpv_handle ctx, const char* name, const char* data) { (void)ctx; (void)name; (void)data; return 0; }
-EXPORT const char* mpv_error_string(int error) { (void)error; return "success"; }
-EXPORT void mpv_set_pcm_callback(mpv_handle ctx, mpv_pcm_callback_fn cb, void* user_data) { (void)ctx; (void)cb; (void)user_data; }
-EOSRC
-
-  local cc="${CC:-gcc}"
-  if ! command -v "${cc}" >/dev/null 2>&1; then
-    cc="clang"
-  fi
-
-  echo "Building iOS mpv.framework binary..."
-  if command -v xcrun >/dev/null 2>&1; then
-    local sdk
-    sdk="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true)"
-    if [ -n "${sdk}" ]; then
-      xcrun --sdk iphoneos clang -arch arm64 -isysroot "${sdk}" -dynamiclib -o "${fw_dir}/mpv" "${src_c}" \
-        -install_name "@rpath/mpv.framework/mpv" 2>/dev/null || true
+    # Verify critical core client API and PCM tap
+    if ! nm -D --defined-only "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
+      echo "ERROR: ${so_file} is missing mandatory mpv_create symbol." >&2
+      return 1
     fi
   fi
 
-  if [ ! -f "${fw_dir}/mpv" ]; then
-    "${cc}" -shared -fPIC -O2 "${src_c}" -o "${fw_dir}/mpv"
+  return 0
+}
+
+verify_real_ios_framework() {
+  local fw_dir="$1"
+  local bin_file="${fw_dir}/mpv"
+
+  if [ ! -f "${bin_file}" ]; then
+    return 1
   fi
+
+  if command -v nm >/dev/null 2>&1; then
+    local sym_count=$(nm -defined-only "${bin_file}" 2>/dev/null | wc -l || echo 0)
+    if [ "${sym_count}" -lt 50 ]; then
+      echo "ERROR: ${bin_file} appears to be an invalid framework (${sym_count} symbols)." >&2
+      return 1
+    fi
+  fi
+
+  return 0
 }
 
 stage_android() {
   local abi="$1"
   local target_so="${OUTPUT_DIR}/android/${abi}/libmpv.so"
   local cached_so="${CACHE_DIR}/android_${abi}_libmpv.so"
+  local local_built_so="${ROOT_DIR}/build/libmpv/android/${abi}/libmpv.so"
 
   echo "--> Staging Android libmpv for ${abi}..."
 
-  # 1. Download if custom URL provided
-  local dl_url_var="MOBILE_MPV_ANDROID_${abi//-/_}_URL"
-  local dl_url="${!dl_url_var:-${MOBILE_MPV_ANDROID_URL:-}}"
-  if [ -n "${dl_url}" ] && [ ! -f "${cached_so}" ]; then
-    echo "Downloading ${abi} libmpv from ${dl_url}..."
-    curl -fSL -o "${cached_so}" "${dl_url}" || true
+  # 1. Check local build output from scripts/mpv-build/build-android.sh
+  if [ -f "${local_built_so}" ] && verify_real_android_so "${local_built_so}" "${abi}"; then
+    mkdir -p "${OUTPUT_DIR}/android/${abi}"
+    cp "${local_built_so}" "${target_so}"
+    echo "Staged genuine locally built Android ${abi} libmpv.so: ${target_so}"
+    return 0
   fi
 
-  # 2. Use cache or build if stub explicitly allowed
+  # 2. Check cached binary (must pass integrity check)
   if [ -f "${cached_so}" ]; then
-    mkdir -p "${OUTPUT_DIR}/android/${abi}"
-    cp "${cached_so}" "${target_so}"
-    echo "Verified Android ${abi} libmpv.so: ${target_so}"
-  elif [ "${MOBILE_MPV_ALLOW_STUB:-0}" = "1" ] || [ "${ALLOW_STUB:-0}" = "1" ]; then
-    echo "Notice: MOBILE_MPV_ALLOW_STUB=1 enabled. Compiling stub for Android ${abi}..."
-    mkdir -p "${OUTPUT_DIR}/android/${abi}"
-    build_android_libmpv_stub "${abi}" "${target_so}"
-    cp "${target_so}" "${cached_so}"
-    echo "Staged Android ${abi} libmpv.so (stub mode): ${target_so}"
-  else
-    echo "Notice: No real prebuilt libmpv.so found for Android ${abi} (MOBILE_MPV_ANDROID_URL not provided)."
-    echo "Skipping staging of stub libmpv.so to prevent false positives in audio bridge."
+    if verify_real_android_so "${cached_so}" "${abi}"; then
+      mkdir -p "${OUTPUT_DIR}/android/${abi}"
+      cp "${cached_so}" "${target_so}"
+      echo "Staged genuine cached Android ${abi} libmpv.so: ${target_so}"
+      return 0
+    else
+      echo "Discarding invalid cached binary: ${cached_so}"
+      rm -f "${cached_so}"
+    fi
   fi
+
+  # 3. Download if custom URL provided
+  local dl_url_var="MOBILE_MPV_ANDROID_${abi//-/_}_URL"
+  local dl_url="${!dl_url_var:-${MOBILE_MPV_ANDROID_URL:-}}"
+  if [ -n "${dl_url}" ]; then
+    echo "Downloading ${abi} libmpv from ${dl_url}..."
+    if curl -fSL -o "${cached_so}" "${dl_url}"; then
+      if verify_real_android_so "${cached_so}" "${abi}"; then
+        mkdir -p "${OUTPUT_DIR}/android/${abi}"
+        cp "${cached_so}" "${target_so}"
+        echo "Successfully downloaded and verified Android ${abi} libmpv.so: ${target_so}"
+        return 0
+      else
+        rm -f "${cached_so}"
+        echo "ERROR: Downloaded libmpv from ${dl_url} failed integrity verification." >&2
+        exit 1
+      fi
+    else
+      rm -f "${cached_so}"
+      echo "ERROR: Failed to download libmpv from ${dl_url}." >&2
+      exit 1
+    fi
+  fi
+
+  # 4. Loud Fail - Zero tolerance for missing genuine binary
+  echo "ERROR: Authentic libmpv.so not found for Android ${abi}!" >&2
+  echo "To resolve this, either:" >&2
+  echo "  1) Build genuine libmpv from source: bash scripts/mpv-build/build-android.sh ${abi}" >&2
+  echo "  2) Set MOBILE_MPV_ANDROID_${abi//-/_}_URL or MOBILE_MPV_ANDROID_URL to a valid release asset." >&2
+  exit 1
 }
 
 stage_ios() {
   local target_fw="${OUTPUT_DIR}/ios/mpv.framework"
   local cached_fw="${CACHE_DIR}/mpv.framework"
+  local local_built_fw="${ROOT_DIR}/build/libmpv/ios/mpv.framework"
 
   echo "--> Staging iOS mpv.framework..."
 
-  local dl_url="${MOBILE_MPV_IOS_URL:-}"
-  if [ -n "${dl_url}" ] && [ ! -d "${cached_fw}" ]; then
-    echo "Downloading iOS mpv.framework from ${dl_url}..."
-    mkdir -p "${CACHE_DIR}/ios_dl"
-    if curl -fSL -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" "${dl_url}"; then
-      unzip -q -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" -d "${CACHE_DIR}/" || true
+  # 1. Check local build output from scripts/mpv-build/build-ios.sh
+  if [ -d "${local_built_fw}" ] && verify_real_ios_framework "${local_built_fw}"; then
+    mkdir -p "${OUTPUT_DIR}/ios"
+    rm -rf "${target_fw}"
+    cp -a "${local_built_fw}" "${OUTPUT_DIR}/ios/"
+    echo "Staged genuine locally built iOS mpv.framework: ${target_fw}"
+    return 0
+  fi
+
+  # 2. Check cached framework
+  if [ -d "${cached_fw}" ]; then
+    if verify_real_ios_framework "${cached_fw}"; then
+      mkdir -p "${OUTPUT_DIR}/ios"
+      rm -rf "${target_fw}"
+      cp -a "${cached_fw}" "${OUTPUT_DIR}/ios/"
+      echo "Staged genuine cached iOS mpv.framework: ${target_fw}"
+      return 0
+    else
+      echo "Discarding invalid cached framework: ${cached_fw}"
+      rm -rf "${cached_fw}"
     fi
   fi
 
-  if [ -d "${cached_fw}" ]; then
-    mkdir -p "${OUTPUT_DIR}/ios"
-    cp -a "${cached_fw}" "${OUTPUT_DIR}/ios/"
-    echo "Verified iOS mpv.framework: ${target_fw}"
-  elif [ "${MOBILE_MPV_ALLOW_STUB:-0}" = "1" ] || [ "${ALLOW_STUB:-0}" = "1" ]; then
-    echo "Notice: MOBILE_MPV_ALLOW_STUB=1 enabled. Compiling stub for iOS mpv.framework..."
-    mkdir -p "${OUTPUT_DIR}/ios"
-    build_ios_mpv_framework "${target_fw}"
-    cp -a "${target_fw}" "${CACHE_DIR}/"
-    echo "Staged iOS mpv.framework (stub mode): ${target_fw}"
-  else
-    echo "Notice: No real prebuilt mpv.framework found for iOS (MOBILE_MPV_IOS_URL not provided)."
-    echo "Skipping staging of stub mpv.framework to prevent false positives in audio bridge."
+  # 3. Download if custom URL provided
+  local dl_url="${MOBILE_MPV_IOS_URL:-}"
+  if [ -n "${dl_url}" ]; then
+    echo "Downloading iOS mpv.framework from ${dl_url}..."
+    mkdir -p "${CACHE_DIR}/ios_dl"
+    if curl -fSL -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" "${dl_url}"; then
+      rm -rf "${CACHE_DIR}/ios_dl/extracted"
+      mkdir -p "${CACHE_DIR}/ios_dl/extracted"
+      unzip -q -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" -d "${CACHE_DIR}/ios_dl/extracted/"
+      local extracted_fw
+      extracted_fw=$(find "${CACHE_DIR}/ios_dl/extracted" -maxdepth 2 -type d -name "mpv.framework" | head -n 1)
+      if [ -n "${extracted_fw}" ] && verify_real_ios_framework "${extracted_fw}"; then
+        rm -rf "${cached_fw}" "${target_fw}"
+        cp -a "${extracted_fw}" "${cached_fw}"
+        mkdir -p "${OUTPUT_DIR}/ios"
+        cp -a "${cached_fw}" "${OUTPUT_DIR}/ios/"
+        rm -rf "${CACHE_DIR}/ios_dl"
+        echo "Successfully downloaded and verified iOS mpv.framework: ${target_fw}"
+        return 0
+      else
+        rm -rf "${CACHE_DIR}/ios_dl"
+        echo "ERROR: Downloaded iOS mpv.framework failed integrity verification." >&2
+        exit 1
+      fi
+    else
+      rm -rf "${CACHE_DIR}/ios_dl"
+      echo "ERROR: Failed to download iOS mpv.framework from ${dl_url}." >&2
+      exit 1
+    fi
   fi
+
+  # 4. Loud Fail - Zero tolerance for missing genuine binary
+  echo "ERROR: Authentic iOS mpv.framework not found!" >&2
+  echo "To resolve this, either:" >&2
+  echo "  1) Build genuine mpv.framework on macOS: bash scripts/mpv-build/build-ios.sh" >&2
+  echo "  2) Set MOBILE_MPV_IOS_URL to a valid release asset URL." >&2
+  exit 1
 }
 
 case "${PLATFORM}" in
@@ -261,6 +244,6 @@ if [ -s "${CHECKSUMS_FILE}" ]; then
   echo "Mobile mpv artifacts successfully staged and verified at ${OUTPUT_DIR}!"
 else
   rm -f "${CHECKSUMS_FILE}"
-  echo "Notice: No mobile libmpv runtime binaries staged. Native bridge will operate in clean unbundled mode."
+  echo "ERROR: No mobile libmpv runtime binaries staged. Failing build." >&2
+  exit 1
 fi
-
