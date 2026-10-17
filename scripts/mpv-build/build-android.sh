@@ -19,6 +19,7 @@ FFMPEG_VERSION="n6.1.1"
 LIBPLACEBO_VERSION="v6.338.2"
 LIBASS_VERSION="0.17.2"
 FREETYPE_VERSION="VER-2-13-2"
+FRIBIDI_VERSION="v1.0.14"
 
 echo "=========================================================="
 echo " BBeBee Android Real libmpv Builder"
@@ -99,8 +100,8 @@ trap cleanup EXIT
 
 CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 export PKG_CONFIG_SYSROOT_DIR="${PREFIX_DIR}"
-export PKG_CONFIG_LIBDIR="${PREFIX_DIR}/lib/pkgconfig"
-export PKG_CONFIG_PATH="${PREFIX_DIR}/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="${PREFIX_DIR}/lib/pkgconfig:${PREFIX_DIR}/lib64/pkgconfig:${PREFIX_DIR}/share/pkgconfig"
+export PKG_CONFIG_PATH="${PREFIX_DIR}/lib/pkgconfig:${PREFIX_DIR}/lib64/pkgconfig:${PREFIX_DIR}/share/pkgconfig"
 
 # 3. Build FFmpeg (Static, Audio/MediaCodec Tailored)
 echo "=== [1/4] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
@@ -141,8 +142,8 @@ git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpe
   make install
 )
 
-# 4. Build FreeType & libass (Static, minimal OSD requirement for mpv)
-echo "=== [2/4] Building FreeType & libass for Android ${ABI} ==="
+# 4. Build FreeType, FriBidi & libass (Static, minimal OSD requirement for mpv)
+echo "=== [2/5] Building FreeType for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/freetype-src"
 git clone --depth 1 --branch "${FREETYPE_VERSION}" https://gitlab.freedesktop.org/freetype/freetype.git "${WORK_DIR}/freetype-src"
 (
@@ -151,6 +152,7 @@ git clone --depth 1 --branch "${FREETYPE_VERSION}" https://gitlab.freedesktop.or
   ./configure \
     --host="${NDK_TRIPLE}" \
     --prefix="${PREFIX_DIR}" \
+    --libdir="${PREFIX_DIR}/lib" \
     --enable-static \
     --disable-shared \
     --with-png=no \
@@ -164,30 +166,9 @@ git clone --depth 1 --branch "${FREETYPE_VERSION}" https://gitlab.freedesktop.or
   make install
 )
 
-mkdir -p "${WORK_DIR}/libass-src"
-git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
-(
-  cd "${WORK_DIR}/libass-src"
-  ./autogen.sh || true
-  ./configure \
-    --host="${NDK_TRIPLE}" \
-    --prefix="${PREFIX_DIR}" \
-    --enable-static \
-    --disable-shared \
-    --disable-fontconfig \
-    --disable-harfbuzz \
-    --disable-asm \
-    CC="${CC}" AR="${AR}" NM="${NM}" RANLIB="${RANLIB}" \
-    CFLAGS="-O3 -fPIC -I${PREFIX_DIR}/include" \
-    LDFLAGS="-L${PREFIX_DIR}/lib"
-  make -j"${CORES}"
-  make install
-)
-
-# 5. Build libplacebo (Static, minimal without vulkan/demos/shaderc)
-echo "=== [3/4] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
-mkdir -p "${WORK_DIR}/libplacebo-src"
-git clone --depth 1 --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
+echo "=== [3/5] Building FriBidi (${FRIBIDI_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/fribidi-src"
+git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fribidi.git "${WORK_DIR}/fribidi-src"
 
 CROSS_FILE="${WORK_DIR}/crossfile.txt"
 cat << CROSSFILE > "${CROSS_FILE}"
@@ -206,7 +187,7 @@ strip = '${STRIP}'
 pkg-config = 'pkg-config'
 
 [properties]
-pkg_config_libdir = ['${PREFIX_DIR}/lib/pkgconfig']
+pkg_config_libdir = ['${PREFIX_DIR}/lib/pkgconfig', '${PREFIX_DIR}/lib64/pkgconfig']
 
 [host_machine]
 system = 'android'
@@ -216,10 +197,54 @@ endian = 'little'
 CROSSFILE
 
 (
+  cd "${WORK_DIR}/fribidi-src"
+  meson setup build \
+    --cross-file "${CROSS_FILE}" \
+    --prefix="${PREFIX_DIR}" \
+    --libdir=lib \
+    --default-library=static \
+    -Ddocs=false \
+    -Dtests=false
+  ninja -C build install
+)
+
+echo "=== [4/5] Building libass (${LIBASS_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/libass-src"
+git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
+(
+  cd "${WORK_DIR}/libass-src"
+  ./autogen.sh || true
+  ./configure \
+    --host="${NDK_TRIPLE}" \
+    --prefix="${PREFIX_DIR}" \
+    --libdir="${PREFIX_DIR}/lib" \
+    --enable-static \
+    --disable-shared \
+    --disable-fontconfig \
+    --disable-harfbuzz \
+    --disable-asm \
+    CC="${CC}" AR="${AR}" NM="${NM}" RANLIB="${RANLIB}" \
+    CFLAGS="-O3 -fPIC -I${PREFIX_DIR}/include" \
+    LDFLAGS="-L${PREFIX_DIR}/lib" \
+    FRIBIDI_CFLAGS="-I${PREFIX_DIR}/include/fribidi -I${PREFIX_DIR}/include" \
+    FRIBIDI_LIBS="-L${PREFIX_DIR}/lib -lfribidi" \
+    FREETYPE_CFLAGS="-I${PREFIX_DIR}/include/freetype2 -I${PREFIX_DIR}/include" \
+    FREETYPE_LIBS="-L${PREFIX_DIR}/lib -lfreetype"
+  make -j"${CORES}"
+  make install
+)
+
+# 5. Build libplacebo (Static, minimal without vulkan/demos/shaderc)
+echo "=== [5/5] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/libplacebo-src"
+git clone --depth 1 --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
+
+(
   cd "${WORK_DIR}/libplacebo-src"
   meson setup build \
     --cross-file "${CROSS_FILE}" \
     --prefix="${PREFIX_DIR}" \
+    --libdir=lib \
     --default-library=static \
     -Dvulkan=disabled \
     -Dopengl=disabled \

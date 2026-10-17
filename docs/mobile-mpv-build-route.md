@@ -12,6 +12,10 @@ This document details the authentic cross-compilation pipeline for building `lib
 | **mpv** | `v0.41.0` | `https://github.com/mpv-player/mpv.git` | Commit `41f6a645068483470267271e1d09966ca3b9f413` |
 | **FFmpeg** | `n6.1.1` | `https://github.com/FFmpeg/FFmpeg.git` | Pinned release tag `n6.1.1` |
 | **PCM Tap Patch**| `patches/mpv-pcm-tap.patch` | In-tree patch (276 lines) | **Applies cleanly** to mpv `v0.41.0` (`git apply --check` verified) |
+| **FreeType** | `VER-2-13-2` | `https://gitlab.freedesktop.org/freetype/freetype.git` | Static font rasterizer for libass |
+| **FriBidi** | `v1.0.14` | `https://github.com/fribidi/fribidi.git` | Static bidirectional text core required by libass |
+| **libass** | `0.17.2` | `https://github.com/libass/libass.git` | Static OSD dependency required by mpv core |
+| **libplacebo** | `v6.338.2` | `https://github.com/haasn/libplacebo.git` | Static rendering helper required by mpv core |
 
 ---
 

@@ -34,6 +34,8 @@
   - Full cross-compilation pipeline for `arm64-v8a` (`aarch64`) and `x86_64`.
   - Resolves Android NDK r26b toolchain (API Level 26, Clang/LLVM).
   - Pinned FFmpeg `n6.1.1` and mpv `v0.41.0` with `patches/mpv-pcm-tap.patch`.
+  - Static dependency pipeline: FFmpeg -> FreeType -> FriBidi (`v1.0.14`) -> libass (`0.17.2`) -> libplacebo (`v6.338.2`) -> mpv.
+  - FriBidi resolution: compiles static `fribidi` via Meson into prefix, passing explicit `FRIBIDI_CFLAGS`/`LIBS` and `FREETYPE_CFLAGS`/`LIBS` to `libass`'s `./configure` to eliminate missing FriBidi failures.
   - Audio-only tailoring: AudioTrack, AAudio, OpenSL ES audio backends enabled; ALSA/Pulse/PipeWire/Jack disabled.
   - Strict verification of output `libmpv.so`: architecture check via `file`, dynamic symbol count (>50), mandatory client symbols (`mpv_create`, `mpv_set_pcm_callback`).
   - Loud-fail on invalid ABI or missing NDK.

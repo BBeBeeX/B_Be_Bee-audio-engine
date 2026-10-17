@@ -16,6 +16,10 @@ PATCH_FILE="${ROOT_DIR}/patches/mpv-pcm-tap.patch"
 MPV_VERSION="v0.41.0"
 FFMPEG_VERSION="n6.1.1"
 FRAMEWORK_VERSION="1.2.0"
+LIBPLACEBO_VERSION="v6.338.2"
+LIBASS_VERSION="0.17.2"
+FREETYPE_VERSION="VER-2-13-2"
+FRIBIDI_VERSION="v1.0.14"
 
 echo "=========================================================="
 echo " BBeBee iOS Real mpv Builder"
@@ -61,10 +65,46 @@ build_slice() {
 
   local clang_bin="$(xcrun --sdk "${sdk_name}" -f clang)"
   local clangxx_bin="$(xcrun --sdk "${sdk_name}" -f clang++)"
-  local libtool_bin="$(xcrun --sdk "${sdk_name}" -f libtool)"
+  local ar_bin="$(xcrun --sdk "${sdk_name}" -f ar)"
+  local nm_bin="$(xcrun --sdk "${sdk_name}" -f nm)"
+  local ranlib_bin="$(xcrun --sdk "${sdk_name}" -f ranlib)"
+  local strip_bin="$(xcrun --sdk "${sdk_name}" -f strip)"
+
+  export PKG_CONFIG_SYSROOT_DIR="${slice_prefix}"
+  export PKG_CONFIG_LIBDIR="${slice_prefix}/lib/pkgconfig:${slice_prefix}/lib64/pkgconfig:${slice_prefix}/share/pkgconfig"
+  export PKG_CONFIG_PATH="${slice_prefix}/lib/pkgconfig:${slice_prefix}/lib64/pkgconfig:${slice_prefix}/share/pkgconfig"
+
+  local cpu_family="${arch}"
+  [ "${arch}" = "arm64" ] && cpu_family="aarch64"
+
+  local cross_file_static="${WORK_DIR}/crossfile_static_${slice_name}.txt"
+  cat << CROSSFILE > "${cross_file_static}"
+[built-in options]
+buildtype = 'release'
+default_library = 'static'
+c_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
+c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib']
+
+[binaries]
+c = '${clang_bin}'
+cpp = '${clangxx_bin}'
+ar = '${ar_bin}'
+nm = '${nm_bin}'
+strip = '${strip_bin}'
+pkg-config = 'pkg-config'
+
+[properties]
+pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkgconfig']
+
+[host_machine]
+system = 'darwin'
+cpu_family = '${cpu_family}'
+cpu = '${arch}'
+endian = 'little'
+CROSSFILE
 
   # 1. Build FFmpeg for this iOS slice
-  echo "--- Compiling FFmpeg for ${slice_name} ---"
+  echo "--- [1/6] Compiling FFmpeg for ${slice_name} ---"
   local ffmpeg_build="${WORK_DIR}/ffmpeg_${slice_name}"
   mkdir -p "${ffmpeg_build}"
   if [ ! -d "${WORK_DIR}/ffmpeg-src" ]; then
@@ -76,6 +116,7 @@ build_slice() {
     cd "${ffmpeg_build}"
     ./configure \
       --prefix="${slice_prefix}" \
+      --libdir="${slice_prefix}/lib" \
       --enable-cross-compile \
       --target-os=darwin \
       --arch="${arch}" \
@@ -99,8 +140,113 @@ build_slice() {
     make install
   )
 
-  # 2. Build mpv for this iOS slice
-  echo "--- Compiling Patched mpv for ${slice_name} ---"
+  # 2. Build FreeType for this iOS slice
+  echo "--- [2/6] Compiling FreeType for ${slice_name} ---"
+  local freetype_build="${WORK_DIR}/freetype_${slice_name}"
+  mkdir -p "${freetype_build}"
+  if [ ! -d "${WORK_DIR}/freetype-src" ]; then
+    git clone --depth 1 --branch "${FREETYPE_VERSION}" https://gitlab.freedesktop.org/freetype/freetype.git "${WORK_DIR}/freetype-src"
+  fi
+  cp -r "${WORK_DIR}/freetype-src"/* "${freetype_build}/"
+
+  (
+    cd "${freetype_build}"
+    ./autogen.sh || true
+    ./configure \
+      --host="${arch}-apple-darwin" \
+      --prefix="${slice_prefix}" \
+      --libdir="${slice_prefix}/lib" \
+      --enable-static \
+      --disable-shared \
+      --with-png=no \
+      --with-zlib=no \
+      --with-bzip2=no \
+      --with-brotli=no \
+      --with-harfbuzz=no \
+      CC="${clang_bin}" AR="${ar_bin}" NM="${nm_bin}" RANLIB="${ranlib_bin}" \
+      CFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -O3 -fPIC"
+    make -j"${CORES}"
+    make install
+  )
+
+  # 3. Build FriBidi for this iOS slice
+  echo "--- [3/6] Compiling FriBidi for ${slice_name} ---"
+  local fribidi_build="${WORK_DIR}/fribidi_${slice_name}"
+  mkdir -p "${fribidi_build}"
+  if [ ! -d "${WORK_DIR}/fribidi-src" ]; then
+    git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fribidi.git "${WORK_DIR}/fribidi-src"
+  fi
+  cp -r "${WORK_DIR}/fribidi-src"/* "${fribidi_build}/"
+
+  (
+    cd "${fribidi_build}"
+    meson setup build \
+      --cross-file "${cross_file_static}" \
+      --prefix="${slice_prefix}" \
+      --libdir=lib \
+      --default-library=static \
+      -Ddocs=false \
+      -Dtests=false
+    ninja -C build install
+  )
+
+  # 4. Build libass for this iOS slice
+  echo "--- [4/6] Compiling libass for ${slice_name} ---"
+  local libass_build="${WORK_DIR}/libass_${slice_name}"
+  mkdir -p "${libass_build}"
+  if [ ! -d "${WORK_DIR}/libass-src" ]; then
+    git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
+  fi
+  cp -r "${WORK_DIR}/libass-src"/* "${libass_build}/"
+
+  (
+    cd "${libass_build}"
+    ./autogen.sh || true
+    ./configure \
+      --host="${arch}-apple-darwin" \
+      --prefix="${slice_prefix}" \
+      --libdir="${slice_prefix}/lib" \
+      --enable-static \
+      --disable-shared \
+      --disable-fontconfig \
+      --disable-harfbuzz \
+      --disable-asm \
+      CC="${clang_bin}" AR="${ar_bin}" NM="${nm_bin}" RANLIB="${ranlib_bin}" \
+      CFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -O3 -fPIC -I${slice_prefix}/include" \
+      LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -L${slice_prefix}/lib" \
+      FRIBIDI_CFLAGS="-I${slice_prefix}/include/fribidi -I${slice_prefix}/include" \
+      FRIBIDI_LIBS="-L${slice_prefix}/lib -lfribidi" \
+      FREETYPE_CFLAGS="-I${slice_prefix}/include/freetype2 -I${slice_prefix}/include" \
+      FREETYPE_LIBS="-L${slice_prefix}/lib -lfreetype"
+    make -j"${CORES}"
+    make install
+  )
+
+  # 5. Build libplacebo for this iOS slice
+  echo "--- [5/6] Compiling libplacebo for ${slice_name} ---"
+  local libplacebo_build="${WORK_DIR}/libplacebo_${slice_name}"
+  mkdir -p "${libplacebo_build}"
+  if [ ! -d "${WORK_DIR}/libplacebo-src" ]; then
+    git clone --depth 1 --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
+  fi
+  cp -r "${WORK_DIR}/libplacebo-src"/* "${libplacebo_build}/"
+
+  (
+    cd "${libplacebo_build}"
+    meson setup build \
+      --cross-file "${cross_file_static}" \
+      --prefix="${slice_prefix}" \
+      --libdir=lib \
+      --default-library=static \
+      -Dvulkan=disabled \
+      -Dopengl=disabled \
+      -Dshaderc=disabled \
+      -Ddemos=false
+    ninja -C build install
+  )
+
+  # 6. Build mpv for this iOS slice
+  echo "--- [6/6] Compiling Patched mpv for ${slice_name} ---"
   local mpv_build="${WORK_DIR}/mpv_${slice_name}"
   mkdir -p "${mpv_build}"
   if [ ! -d "${WORK_DIR}/mpv-src" ]; then
@@ -116,9 +262,6 @@ build_slice() {
   fi
   cp -r "${WORK_DIR}/mpv-src"/* "${mpv_build}/"
 
-  local cpu_family="${arch}"
-  [ "${arch}" = "arm64" ] && cpu_family="aarch64"
-
   local cross_file="${WORK_DIR}/crossfile_${slice_name}.txt"
   cat << CROSSFILE > "${cross_file}"
 [built-in options]
@@ -130,13 +273,13 @@ c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}'
 [binaries]
 c = '${clang_bin}'
 cpp = '${clangxx_bin}'
-ar = 'ar'
-nm = 'nm'
-strip = 'strip'
+ar = '${ar_bin}'
+nm = '${nm_bin}'
+strip = '${strip_bin}'
 pkg-config = 'pkg-config'
 
 [properties]
-pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig']
+pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkgconfig']
 
 [host_machine]
 system = 'darwin'
@@ -147,10 +290,6 @@ CROSSFILE
 
   (
     cd "${mpv_build}"
-    export PKG_CONFIG_SYSROOT_DIR="${slice_prefix}"
-    export PKG_CONFIG_LIBDIR="${slice_prefix}/lib/pkgconfig"
-    export PKG_CONFIG_PATH="${slice_prefix}/lib/pkgconfig"
-
     meson setup build \
       --cross-file "${cross_file}" \
       --default-library shared \
@@ -202,7 +341,7 @@ echo "=== Assembling Authentic mpv.framework ==="
 rm -rf "${TARGET_DIR}"
 mkdir -p "${TARGET_DIR}/Headers"
 
-# Copy device binary as primary framework executable (or universal if needed)
+# Copy device binary as primary framework executable
 cp "${WORK_DIR}/binaries/mpv_device_arm64" "${TARGET_DIR}/mpv"
 chmod 0755 "${TARGET_DIR}/mpv"
 
