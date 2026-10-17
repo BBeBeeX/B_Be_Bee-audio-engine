@@ -91,7 +91,7 @@ jobs:
       - name: Install build dependencies via Homebrew
         run: |
           brew update
-          brew install cmake ninja meson pkg-config ffmpeg libass libplacebo uchardet luajit
+          brew install cmake ninja meson pkg-config ffmpeg libass libplacebo uchardet luajit nasm
 
       - name: Build Patched libmpv (arm64)
         run: |
@@ -227,7 +227,7 @@ jobs:
       - name: Install Android libmpv Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build meson pkg-config yasm nasm zip
+          sudo apt-get install -y build-essential cmake ninja-build meson pkg-config yasm nasm zip autoconf automake libtool
 
       - name: Build Genuine libmpv for Android ABIs
         run: |

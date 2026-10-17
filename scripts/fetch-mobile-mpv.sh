@@ -72,6 +72,12 @@ stage_android() {
 
   echo "--> Staging Android libmpv for ${abi}..."
 
+  # 0. Check if target is already staged and authentic
+  if [ -f "${target_so}" ] && verify_real_android_so "${target_so}" "${abi}"; then
+    echo "Found already staged genuine Android ${abi} libmpv.so: ${target_so}"
+    return 0
+  fi
+
   # 1. Check local build output from scripts/mpv-build/build-android.sh
   if [ -f "${local_built_so}" ] && verify_real_android_so "${local_built_so}" "${abi}"; then
     mkdir -p "${OUTPUT_DIR}/android/${abi}"
@@ -130,6 +136,12 @@ stage_ios() {
   local local_built_fw="${ROOT_DIR}/build/libmpv/ios/mpv.framework"
 
   echo "--> Staging iOS mpv.framework..."
+
+  # 0. Check if target is already staged and authentic
+  if [ -d "${target_fw}" ] && verify_real_ios_framework "${target_fw}"; then
+    echo "Found already staged genuine iOS mpv.framework: ${target_fw}"
+    return 0
+  fi
 
   # 1. Check local build output from scripts/mpv-build/build-ios.sh
   if [ -d "${local_built_fw}" ] && verify_real_ios_framework "${local_built_fw}"; then

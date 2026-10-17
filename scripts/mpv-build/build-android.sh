@@ -20,6 +20,7 @@ LIBPLACEBO_VERSION="v6.338.2"
 LIBASS_VERSION="0.17.2"
 FREETYPE_VERSION="VER-2-13-2"
 FRIBIDI_VERSION="v1.0.14"
+HARFBUZZ_VERSION="8.3.0"
 
 echo "=========================================================="
 echo " BBeBee Android Real libmpv Builder"
@@ -99,12 +100,39 @@ cleanup() {
 trap cleanup EXIT
 
 CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-export PKG_CONFIG_SYSROOT_DIR="${PREFIX_DIR}"
 export PKG_CONFIG_LIBDIR="${PREFIX_DIR}/lib/pkgconfig:${PREFIX_DIR}/lib64/pkgconfig:${PREFIX_DIR}/share/pkgconfig"
 export PKG_CONFIG_PATH="${PREFIX_DIR}/lib/pkgconfig:${PREFIX_DIR}/lib64/pkgconfig:${PREFIX_DIR}/share/pkgconfig"
 
+CROSS_FILE="${WORK_DIR}/crossfile.txt"
+cat << CROSSFILE > "${CROSS_FILE}"
+[built-in options]
+buildtype = 'release'
+default_library = 'static'
+c_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
+cpp_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
+c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-static-libstdc++']
+cpp_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-static-libstdc++']
+
+[binaries]
+c = '${CC}'
+cpp = '${CXX}'
+ar = '${AR}'
+nm = '${NM}'
+strip = '${STRIP}'
+pkg-config = 'pkg-config'
+
+[properties]
+pkg_config_libdir = ['${PREFIX_DIR}/lib/pkgconfig', '${PREFIX_DIR}/lib64/pkgconfig', '${PREFIX_DIR}/share/pkgconfig']
+
+[host_machine]
+system = 'android'
+cpu_family = '${CPU_FAMILY}'
+cpu = '${CPU}'
+endian = 'little'
+CROSSFILE
+
 # 3. Build FFmpeg (Static, Audio/MediaCodec Tailored)
-echo "=== [1/4] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
+echo "=== [1/6] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/ffmpeg-src"
 git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
 
@@ -112,6 +140,7 @@ git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpe
   cd "${WORK_DIR}/ffmpeg-src"
   ./configure \
     --prefix="${PREFIX_DIR}" \
+    --libdir="${PREFIX_DIR}/lib" \
     --enable-cross-compile \
     --target-os=android \
     --arch="${ARCH}" \
@@ -142,59 +171,30 @@ git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpe
   make install
 )
 
-# 4. Build FreeType, FriBidi & libass (Static, minimal OSD requirement for mpv)
-echo "=== [2/5] Building FreeType for Android ${ABI} ==="
+# 4. Build FreeType (Static)
+echo "=== [2/6] Building FreeType (${FREETYPE_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/freetype-src"
 git clone --depth 1 --branch "${FREETYPE_VERSION}" https://gitlab.freedesktop.org/freetype/freetype.git "${WORK_DIR}/freetype-src"
 (
   cd "${WORK_DIR}/freetype-src"
-  ./autogen.sh || true
-  ./configure \
-    --host="${NDK_TRIPLE}" \
+  meson setup build \
+    --cross-file "${CROSS_FILE}" \
     --prefix="${PREFIX_DIR}" \
-    --libdir="${PREFIX_DIR}/lib" \
-    --enable-static \
-    --disable-shared \
-    --with-png=no \
-    --with-zlib=no \
-    --with-bzip2=no \
-    --with-brotli=no \
-    --with-harfbuzz=no \
-    CC="${CC}" AR="${AR}" NM="${NM}" RANLIB="${RANLIB}" \
-    CFLAGS="-O3 -fPIC"
-  make -j"${CORES}"
-  make install
+    --libdir=lib \
+    --default-library=static \
+    -Dbrotli=disabled \
+    -Dbzip2=disabled \
+    -Dharfbuzz=disabled \
+    -Dpng=disabled \
+    -Dzlib=disabled \
+    -Dtests=disabled
+  ninja -C build install
 )
 
-echo "=== [3/5] Building FriBidi (${FRIBIDI_VERSION}) for Android ${ABI} ==="
+# 5. Build FriBidi (Static)
+echo "=== [3/6] Building FriBidi (${FRIBIDI_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/fribidi-src"
 git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fribidi.git "${WORK_DIR}/fribidi-src"
-
-CROSS_FILE="${WORK_DIR}/crossfile.txt"
-cat << CROSSFILE > "${CROSS_FILE}"
-[built-in options]
-buildtype = 'release'
-default_library = 'static'
-c_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
-c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384']
-
-[binaries]
-c = '${CC}'
-cpp = '${CXX}'
-ar = '${AR}'
-nm = '${NM}'
-strip = '${STRIP}'
-pkg-config = 'pkg-config'
-
-[properties]
-pkg_config_libdir = ['${PREFIX_DIR}/lib/pkgconfig', '${PREFIX_DIR}/lib64/pkgconfig']
-
-[host_machine]
-system = 'android'
-cpu_family = '${CPU_FAMILY}'
-cpu = '${CPU}'
-endian = 'little'
-CROSSFILE
 
 (
   cd "${WORK_DIR}/fribidi-src"
@@ -203,39 +203,64 @@ CROSSFILE
     --prefix="${PREFIX_DIR}" \
     --libdir=lib \
     --default-library=static \
+    -Dbin=false \
     -Ddocs=false \
     -Dtests=false
   ninja -C build install
 )
 
-echo "=== [4/5] Building libass (${LIBASS_VERSION}) for Android ${ABI} ==="
+# 6. Build HarfBuzz (Static, Minimal without glib/cairo/icu)
+echo "=== [4/6] Building HarfBuzz (${HARFBUZZ_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/harfbuzz-src"
+git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/harfbuzz.git "${WORK_DIR}/harfbuzz-src"
+
+(
+  cd "${WORK_DIR}/harfbuzz-src"
+  meson setup build \
+    --cross-file "${CROSS_FILE}" \
+    --prefix="${PREFIX_DIR}" \
+    --libdir=lib \
+    --default-library=static \
+    -Dglib=disabled \
+    -Dgobject=disabled \
+    -Dcairo=disabled \
+    -Dchafa=disabled \
+    -Dicu=disabled \
+    -Dgraphite=disabled \
+    -Dgraphite2=disabled \
+    -Dfreetype=disabled \
+    -Dutilities=disabled \
+    -Dtests=disabled \
+    -Ddocs=disabled \
+    -Dbenchmark=disabled \
+    -Dintrospection=disabled
+  ninja -C build install
+)
+
+# 7. Build libass (Static, minimal OSD requirement for mpv)
+echo "=== [5/6] Building libass (${LIBASS_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/libass-src"
 git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
 (
   cd "${WORK_DIR}/libass-src"
-  ./autogen.sh || true
-  ./configure \
-    --host="${NDK_TRIPLE}" \
+  meson setup build \
+    --cross-file "${CROSS_FILE}" \
     --prefix="${PREFIX_DIR}" \
-    --libdir="${PREFIX_DIR}/lib" \
-    --enable-static \
-    --disable-shared \
-    --disable-fontconfig \
-    --disable-harfbuzz \
-    --disable-asm \
-    CC="${CC}" AR="${AR}" NM="${NM}" RANLIB="${RANLIB}" \
-    CFLAGS="-O3 -fPIC -I${PREFIX_DIR}/include" \
-    LDFLAGS="-L${PREFIX_DIR}/lib" \
-    FRIBIDI_CFLAGS="-I${PREFIX_DIR}/include/fribidi -I${PREFIX_DIR}/include" \
-    FRIBIDI_LIBS="-L${PREFIX_DIR}/lib -lfribidi" \
-    FREETYPE_CFLAGS="-I${PREFIX_DIR}/include/freetype2 -I${PREFIX_DIR}/include" \
-    FREETYPE_LIBS="-L${PREFIX_DIR}/lib -lfreetype"
-  make -j"${CORES}"
-  make install
+    --libdir=lib \
+    --default-library=static \
+    -Dfontconfig=disabled \
+    -Ddirectwrite=disabled \
+    -Dcoretext=disabled \
+    -Dasm=disabled \
+    -Dlibunibreak=disabled \
+    -Drequire-system-font-provider=false \
+    -Dtest=false \
+    -Dprofile=false
+  ninja -C build install
 )
 
-# 5. Build libplacebo (Static, minimal without vulkan/demos/shaderc)
-echo "=== [5/5] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
+# 8. Build libplacebo (Static, minimal without vulkan/demos/shaderc)
+echo "=== [6/6] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/libplacebo-src"
 git clone --depth 1 --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
 
@@ -249,12 +274,21 @@ git clone --depth 1 --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/li
     -Dvulkan=disabled \
     -Dopengl=disabled \
     -Dshaderc=disabled \
-    -Ddemos=false
+    -Dglslang=disabled \
+    -Dlcms=disabled \
+    -Ddovi=disabled \
+    -Dlibdovi=disabled \
+    -Dunwind=disabled \
+    -Dxxhash=disabled \
+    -Ddemos=false \
+    -Dtests=false \
+    -Dbench=false \
+    -Dfuzz=false
   ninja -C build install
 )
 
-# 6. Build Patched mpv (libmpv.so with PCM Tap and Android Audio Backends)
-echo "=== [4/4] Building Patched libmpv (${MPV_VERSION}) for Android ${ABI} ==="
+# 9. Build Patched mpv (libmpv.so with PCM Tap and Android Audio Backends)
+echo "=== Building Patched libmpv (${MPV_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/mpv-src"
 git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.git "${WORK_DIR}/mpv-src"
 
@@ -268,13 +302,15 @@ git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.
     echo "PCM tap patch applied with CRLF normalization."
   fi
 
-  # Update crossfile for shared libmpv.so output
+  # Crossfile for shared libmpv.so output
   cat << CROSSFILE > "${CROSS_FILE}"
 [built-in options]
 buildtype = 'release'
 default_library = 'shared'
 c_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
-c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so']
+cpp_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
+c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++']
+cpp_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++']
 
 [binaries]
 c = '${CC}'
@@ -285,7 +321,7 @@ strip = '${STRIP}'
 pkg-config = 'pkg-config'
 
 [properties]
-pkg_config_libdir = ['${PREFIX_DIR}/lib/pkgconfig']
+pkg_config_libdir = ['${PREFIX_DIR}/lib/pkgconfig', '${PREFIX_DIR}/lib64/pkgconfig', '${PREFIX_DIR}/share/pkgconfig']
 
 [host_machine]
 system = 'android'
@@ -317,17 +353,42 @@ CROSSFILE
     -Dx11=disabled \
     -Dsdl2-video=disabled \
     -Dsdl2-audio=disabled \
+    -Dlua=disabled \
+    -Djavascript=disabled \
+    -Duchardet=disabled \
+    -Drubberband=disabled \
+    -Dlcms2=disabled \
+    -Dlibarchive=disabled \
+    -Dcdda=disabled \
+    -Ddvdnav=disabled \
+    -Diconv=disabled \
     -Dmanpage-build=disabled \
     -Dhtml-build=disabled \
     -Dpdf-build=disabled \
+    -Dlibavdevice=disabled \
+    -Dlibbluray=disabled \
+    -Dvapoursynth=disabled \
+    -Dzimg=disabled \
+    -Dcaca=disabled \
+    -Ddrm=disabled \
+    -Dgbm=disabled \
+    -Djpeg=disabled \
+    -Dshaderc=disabled \
+    -Dsixel=disabled \
+    -Dspirv-cross=disabled \
+    -Dvaapi=disabled \
+    -Dvdpau=disabled \
+    -Ddvbin=disabled \
+    -Degl=disabled \
+    -Degl-android=disabled \
     -Dc_args='-Wno-deprecated-declarations'
 
   ninja -C build
 )
 
-# 7. Stage and verify output libmpv.so
+# 10. Stage and verify output libmpv.so
 OUTPUT_SO="${TARGET_DIR}/libmpv.so"
-cp "${WORK_DIR}/mpv-src/build/libmpv.so" "${OUTPUT_SO}"
+cp -L "${WORK_DIR}/mpv-src/build/libmpv.so" "${OUTPUT_SO}"
 chmod 0755 "${OUTPUT_SO}"
 
 echo "=== Build Complete: ${OUTPUT_SO} ==="

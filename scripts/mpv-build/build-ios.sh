@@ -20,6 +20,7 @@ LIBPLACEBO_VERSION="v6.338.2"
 LIBASS_VERSION="0.17.2"
 FREETYPE_VERSION="VER-2-13-2"
 FRIBIDI_VERSION="v1.0.14"
+HARFBUZZ_VERSION="8.3.0"
 
 echo "=========================================================="
 echo " BBeBee iOS Real mpv Builder"
@@ -70,7 +71,6 @@ build_slice() {
   local ranlib_bin="$(xcrun --sdk "${sdk_name}" -f ranlib)"
   local strip_bin="$(xcrun --sdk "${sdk_name}" -f strip)"
 
-  export PKG_CONFIG_SYSROOT_DIR="${slice_prefix}"
   export PKG_CONFIG_LIBDIR="${slice_prefix}/lib/pkgconfig:${slice_prefix}/lib64/pkgconfig:${slice_prefix}/share/pkgconfig"
   export PKG_CONFIG_PATH="${slice_prefix}/lib/pkgconfig:${slice_prefix}/lib64/pkgconfig:${slice_prefix}/share/pkgconfig"
 
@@ -83,18 +83,23 @@ build_slice() {
 buildtype = 'release'
 default_library = 'static'
 c_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
+cpp_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
+objc_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
 c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib']
+cpp_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib']
+objc_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib']
 
 [binaries]
 c = '${clang_bin}'
 cpp = '${clangxx_bin}'
+objc = '${clang_bin}'
 ar = '${ar_bin}'
 nm = '${nm_bin}'
 strip = '${strip_bin}'
 pkg-config = 'pkg-config'
 
 [properties]
-pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkgconfig']
+pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkgconfig', '${slice_prefix}/share/pkgconfig']
 
 [host_machine]
 system = 'darwin'
@@ -111,6 +116,9 @@ CROSSFILE
     git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
   fi
   cp -r "${WORK_DIR}/ffmpeg-src"/* "${ffmpeg_build}/"
+
+  local extra_ff_args=""
+  [ "${arch}" = "x86_64" ] && extra_ff_args="--disable-x86asm"
 
   (
     cd "${ffmpeg_build}"
@@ -135,7 +143,8 @@ CROSSFILE
       --enable-gpl \
       --enable-version3 \
       --enable-audiotoolbox \
-      --enable-videotoolbox
+      --enable-videotoolbox \
+      ${extra_ff_args}
     make -j"${CORES}"
     make install
   )
@@ -151,22 +160,18 @@ CROSSFILE
 
   (
     cd "${freetype_build}"
-    ./autogen.sh || true
-    ./configure \
-      --host="${arch}-apple-darwin" \
+    meson setup build \
+      --cross-file "${cross_file_static}" \
       --prefix="${slice_prefix}" \
-      --libdir="${slice_prefix}/lib" \
-      --enable-static \
-      --disable-shared \
-      --with-png=no \
-      --with-zlib=no \
-      --with-bzip2=no \
-      --with-brotli=no \
-      --with-harfbuzz=no \
-      CC="${clang_bin}" AR="${ar_bin}" NM="${nm_bin}" RANLIB="${ranlib_bin}" \
-      CFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -O3 -fPIC"
-    make -j"${CORES}"
-    make install
+      --libdir=lib \
+      --default-library=static \
+      -Dbrotli=disabled \
+      -Dbzip2=disabled \
+      -Dharfbuzz=disabled \
+      -Dpng=disabled \
+      -Dzlib=disabled \
+      -Dtests=disabled
+    ninja -C build install
   )
 
   # 3. Build FriBidi for this iOS slice
@@ -185,13 +190,46 @@ CROSSFILE
       --prefix="${slice_prefix}" \
       --libdir=lib \
       --default-library=static \
+      -Dbin=false \
       -Ddocs=false \
       -Dtests=false
     ninja -C build install
   )
 
-  # 4. Build libass for this iOS slice
-  echo "--- [4/6] Compiling libass for ${slice_name} ---"
+  # 4. Build HarfBuzz for this iOS slice
+  echo "--- [4/6] Compiling HarfBuzz for ${slice_name} ---"
+  local harfbuzz_build="${WORK_DIR}/harfbuzz_${slice_name}"
+  mkdir -p "${harfbuzz_build}"
+  if [ ! -d "${WORK_DIR}/harfbuzz-src" ]; then
+    git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/harfbuzz.git "${WORK_DIR}/harfbuzz-src"
+  fi
+  cp -r "${WORK_DIR}/harfbuzz-src"/* "${harfbuzz_build}/"
+
+  (
+    cd "${harfbuzz_build}"
+    meson setup build \
+      --cross-file "${cross_file_static}" \
+      --prefix="${slice_prefix}" \
+      --libdir=lib \
+      --default-library=static \
+      -Dglib=disabled \
+      -Dgobject=disabled \
+      -Dcairo=disabled \
+      -Dchafa=disabled \
+      -Dicu=disabled \
+      -Dgraphite=disabled \
+      -Dgraphite2=disabled \
+      -Dfreetype=disabled \
+      -Dutilities=disabled \
+      -Dtests=disabled \
+      -Ddocs=disabled \
+      -Dbenchmark=disabled \
+      -Dintrospection=disabled
+    ninja -C build install
+  )
+
+  # 5. Build libass for this iOS slice
+  echo "--- [5/6] Compiling libass for ${slice_name} ---"
   local libass_build="${WORK_DIR}/libass_${slice_name}"
   mkdir -p "${libass_build}"
   if [ ! -d "${WORK_DIR}/libass-src" ]; then
@@ -201,29 +239,24 @@ CROSSFILE
 
   (
     cd "${libass_build}"
-    ./autogen.sh || true
-    ./configure \
-      --host="${arch}-apple-darwin" \
+    meson setup build \
+      --cross-file "${cross_file_static}" \
       --prefix="${slice_prefix}" \
-      --libdir="${slice_prefix}/lib" \
-      --enable-static \
-      --disable-shared \
-      --disable-fontconfig \
-      --disable-harfbuzz \
-      --disable-asm \
-      CC="${clang_bin}" AR="${ar_bin}" NM="${nm_bin}" RANLIB="${ranlib_bin}" \
-      CFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -O3 -fPIC -I${slice_prefix}/include" \
-      LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -L${slice_prefix}/lib" \
-      FRIBIDI_CFLAGS="-I${slice_prefix}/include/fribidi -I${slice_prefix}/include" \
-      FRIBIDI_LIBS="-L${slice_prefix}/lib -lfribidi" \
-      FREETYPE_CFLAGS="-I${slice_prefix}/include/freetype2 -I${slice_prefix}/include" \
-      FREETYPE_LIBS="-L${slice_prefix}/lib -lfreetype"
-    make -j"${CORES}"
-    make install
+      --libdir=lib \
+      --default-library=static \
+      -Dfontconfig=disabled \
+      -Ddirectwrite=disabled \
+      -Dcoretext=disabled \
+      -Dasm=disabled \
+      -Dlibunibreak=disabled \
+      -Drequire-system-font-provider=false \
+      -Dtest=false \
+      -Dprofile=false
+    ninja -C build install
   )
 
-  # 5. Build libplacebo for this iOS slice
-  echo "--- [5/6] Compiling libplacebo for ${slice_name} ---"
+  # 6. Build libplacebo for this iOS slice
+  echo "--- [6/6] Compiling libplacebo for ${slice_name} ---"
   local libplacebo_build="${WORK_DIR}/libplacebo_${slice_name}"
   mkdir -p "${libplacebo_build}"
   if [ ! -d "${WORK_DIR}/libplacebo-src" ]; then
@@ -241,12 +274,21 @@ CROSSFILE
       -Dvulkan=disabled \
       -Dopengl=disabled \
       -Dshaderc=disabled \
-      -Ddemos=false
+      -Dglslang=disabled \
+      -Dlcms=disabled \
+      -Ddovi=disabled \
+      -Dlibdovi=disabled \
+      -Dunwind=disabled \
+      -Dxxhash=disabled \
+      -Ddemos=false \
+      -Dtests=false \
+      -Dbench=false \
+      -Dfuzz=false
     ninja -C build install
   )
 
-  # 6. Build mpv for this iOS slice
-  echo "--- [6/6] Compiling Patched mpv for ${slice_name} ---"
+  # 7. Build mpv for this iOS slice
+  echo "--- Compiling Patched mpv for ${slice_name} ---"
   local mpv_build="${WORK_DIR}/mpv_${slice_name}"
   mkdir -p "${mpv_build}"
   if [ ! -d "${WORK_DIR}/mpv-src" ]; then
@@ -268,18 +310,23 @@ CROSSFILE
 buildtype = 'release'
 default_library = 'shared'
 c_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
+cpp_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
+objc_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
 c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv']
+cpp_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv']
+objc_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv']
 
 [binaries]
 c = '${clang_bin}'
 cpp = '${clangxx_bin}'
+objc = '${clang_bin}'
 ar = '${ar_bin}'
 nm = '${nm_bin}'
 strip = '${strip_bin}'
 pkg-config = 'pkg-config'
 
 [properties]
-pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkgconfig']
+pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkgconfig', '${slice_prefix}/share/pkgconfig']
 
 [host_machine]
 system = 'darwin'
@@ -290,6 +337,8 @@ CROSSFILE
 
   (
     cd "${mpv_build}"
+    export MACOS_SDK="${sdk_path}"
+    export MACOS_SDK_VERSION="$(xcrun --sdk "${sdk_name}" --show-sdk-version 2>/dev/null || echo '15.0')"
     meson setup build \
       --cross-file "${cross_file}" \
       --default-library shared \
@@ -313,9 +362,35 @@ CROSSFILE
       -Dx11=disabled \
       -Dsdl2-video=disabled \
       -Dsdl2-audio=disabled \
+      -Dlua=disabled \
+      -Djavascript=disabled \
+      -Duchardet=disabled \
+      -Drubberband=disabled \
+      -Dlcms2=disabled \
+      -Dlibarchive=disabled \
+      -Dcdda=disabled \
+      -Ddvdnav=disabled \
+      -Diconv=disabled \
       -Dmanpage-build=disabled \
       -Dhtml-build=disabled \
       -Dpdf-build=disabled \
+      -Dlibavdevice=disabled \
+      -Dlibbluray=disabled \
+      -Dvapoursynth=disabled \
+      -Dzimg=disabled \
+      -Dcaca=disabled \
+      -Ddrm=disabled \
+      -Dgbm=disabled \
+      -Djpeg=disabled \
+      -Dshaderc=disabled \
+      -Dsixel=disabled \
+      -Dspirv-cross=disabled \
+      -Dvaapi=disabled \
+      -Dvdpau=disabled \
+      -Ddvbin=disabled \
+      -Degl=disabled \
+      -Dvideotoolbox-gl=disabled \
+      -Dswift-build=disabled \
       -Dc_args='-Wno-deprecated-declarations'
 
     ninja -C build
