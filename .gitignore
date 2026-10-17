@@ -8,6 +8,7 @@ output/
 staging/
 release-assets/
 target/
+.cache/
 
 # Dynamic and shared libraries (Zero Binary Policy)
 *.so

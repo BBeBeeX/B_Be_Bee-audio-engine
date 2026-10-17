@@ -16,11 +16,7 @@
       "note": "Apple Silicon (M-series) exclusively supported. Intel x64 dropped per Decision D1.",
       "packages": {
         "full": {
-          "archive": "audio-engine-darwin-arm64-full.tar.gz",
-          "itemCount": 3
-        },
-        "slim": {
-          "archive": "audio-engine-darwin-arm64-slim.tar.gz",
+          "archive": "audio-engine-macos-arm64.tar.gz",
           "itemCount": 3
         }
       },
@@ -44,7 +40,7 @@
       "os": "linux",
       "packages": {
         "full": {
-          "archive": "audio-engine-linux-x64-full.tar.gz",
+          "archive": "audio-engine-linux-x64.tar.gz",
           "itemCount": 214,
           "description": "Full dependency closure including ffmpeg/avcodec, pulse, pipewire, alsa, and graphics stacks"
         },
@@ -101,12 +97,12 @@
       "os": "win32",
       "packages": {
         "full": {
-          "archive": "audio-engine-win32-x64-full.zip",
+          "archive": "audio-engine-windows-x64.zip",
           "itemCount": 116,
           "description": "Full MinGW dependency closure without System32 collision DLLs"
         },
         "slim": {
-          "archive": "audio-engine-win32-x64-slim.zip",
+          "archive": "audio-engine-windows-x64-slim.zip",
           "itemCount": 2,
           "description": "audio-engine.exe and libmpv-2.dll only"
         }
@@ -149,10 +145,10 @@
       "apiLevel": 26,
       "packages": {
         "arm64-v8a": {
-          "archive": "audio-engine-android-arm64-v8a.tar.gz"
+          "archive": "audio-engine-android-arm64-v8a.zip"
         },
         "x86_64": {
-          "archive": "audio-engine-android-x86_64.tar.gz"
+          "archive": "audio-engine-android-x86_64.zip"
         }
       },
       "keyLibraries": [
@@ -172,7 +168,7 @@
       "minimumDeploymentTarget": "15.0",
       "packages": {
         "xcframework": {
-          "archive": "BBeBeeAudioEngine.xcframework.zip"
+          "archive": "audio-engine-ios.xcframework.zip"
         }
       },
       "keyLibraries": [

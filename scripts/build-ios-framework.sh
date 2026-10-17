@@ -72,6 +72,15 @@ xcodebuild -create-xcframework \
   -library "${BUILD_DIR}/sim/libBBeBeeAudioBridge.a" -headers "${BUILD_DIR}/headers" \
   -output "${BUILD_DIR}/BBeBeeAudioBridge.xcframework"
 
+echo "=== Staging mpv framework support ==="
+if [ -d "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework" ]; then
+  cp -a "${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework" "${BUILD_DIR}/"
+fi
+
 echo "=== Packaging iOS xcframework zip ==="
-(cd "${BUILD_DIR}" && zip -rq "${DIST_DIR}/audio-engine-ios.xcframework.zip" BBeBeeAudioBridge.xcframework)
+if [ -d "${BUILD_DIR}/mpv.framework" ]; then
+  (cd "${BUILD_DIR}" && zip -rq "${DIST_DIR}/audio-engine-ios.xcframework.zip" BBeBeeAudioBridge.xcframework mpv.framework)
+else
+  (cd "${BUILD_DIR}" && zip -rq "${DIST_DIR}/audio-engine-ios.xcframework.zip" BBeBeeAudioBridge.xcframework)
+fi
 echo "=== Created ${DIST_DIR}/audio-engine-ios.xcframework.zip ==="
