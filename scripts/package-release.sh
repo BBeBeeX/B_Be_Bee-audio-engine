@@ -265,14 +265,28 @@ echo "Created: ${DIST_DIR}/audio-engine-ios.xcframework.zip"
 echo "[6/6] Generating and validating SHA256SUMS..."
 cd "${DIST_DIR}"
 rm -f sha256-*.txt SHA256SUMS SHA256SUMS.txt
-sha256sum * > SHA256SUMS
+
+SHA256_CMD=()
+SHA256_CHECK=()
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256_CMD=(sha256sum)
+  SHA256_CHECK=(sha256sum -c)
+elif command -v shasum >/dev/null 2>&1; then
+  SHA256_CMD=(shasum -a 256)
+  SHA256_CHECK=(shasum -a 256 -c)
+else
+  echo "Error: Neither sha256sum nor shasum found on system." >&2
+  exit 1
+fi
+
+"${SHA256_CMD[@]}" * > SHA256SUMS
 
 echo "--- SHA256 Checksums ---"
 cat SHA256SUMS
 echo "------------------------"
 
 echo "Validating checksums against generated archives..."
-sha256sum -c SHA256SUMS
+"${SHA256_CHECK[@]}" SHA256SUMS
 
 echo ""
 echo "=== Inspecting Mobile Archives ==="

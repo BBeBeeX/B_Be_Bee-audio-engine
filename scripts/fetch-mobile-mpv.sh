@@ -213,9 +213,23 @@ esac
 # Generate SHA256SUMS for staged mobile artifacts
 echo "Calculating SHA256 integrity checksums..."
 CHECKSUMS_FILE="${OUTPUT_DIR}/SHA256SUMS.mobile"
+
+SHA256_CMD=()
+SHA256_CHECK=()
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256_CMD=(sha256sum)
+  SHA256_CHECK=(sha256sum -c)
+elif command -v shasum >/dev/null 2>&1; then
+  SHA256_CMD=(shasum -a 256)
+  SHA256_CHECK=(shasum -a 256 -c)
+else
+  echo "Error: Neither sha256sum nor shasum found on system." >&2
+  exit 1
+fi
+
 (
   cd "${OUTPUT_DIR}"
-  find . -type f ! -name "SHA256SUMS*" -exec sha256sum {} + | sort -k 2 > "${CHECKSUMS_FILE}"
+  find . -type f ! -name "SHA256SUMS*" -exec "${SHA256_CMD[@]}" {} + | sort -k 2 > "${CHECKSUMS_FILE}"
 )
 
 echo "--- Mobile mpv Checksums ---"
@@ -223,6 +237,7 @@ cat "${CHECKSUMS_FILE}"
 echo "----------------------------"
 
 echo "Validating mobile checksum integrity..."
-(cd "${OUTPUT_DIR}" && sha256sum -c "${CHECKSUMS_FILE}")
+(cd "${OUTPUT_DIR}" && "${SHA256_CHECK[@]}" "${CHECKSUMS_FILE}")
 
 echo "Mobile mpv artifacts successfully staged and verified at ${OUTPUT_DIR}!"
+
