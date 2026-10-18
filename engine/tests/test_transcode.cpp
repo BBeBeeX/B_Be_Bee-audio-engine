@@ -13,14 +13,20 @@
  */
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 #include "../transcode.hpp"
 
@@ -38,28 +44,38 @@ static int g_failed = 0;
 // Helpers
 // ---------------------------------------------------------------------------
 
-static std::string makeTempDir() {
-    char tmpl[] = "/tmp/bbebee-transcode-test-XXXXXX";
-    char* d = mkdtemp(tmpl);
-    assert(d);
-    return std::string(d);
+[[maybe_unused]] static std::string makeTempDir() {
+    try {
+        auto base = std::filesystem::temp_directory_path();
+        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto p = base / ("bbebee-transcode-test-" + std::to_string(now));
+        std::filesystem::create_directories(p);
+        return p.string();
+    } catch (...) {
+#if defined(__unix__) || defined(__APPLE__)
+        char tmpl[] = "/tmp/bbebee-transcode-test-XXXXXX";
+        char* d = mkdtemp(tmpl);
+        if (d) return std::string(d);
+#endif
+        return "/tmp";
+    }
 }
 
-static void writeU16(std::ofstream& f, uint16_t v) {
+[[maybe_unused]] static void writeU16(std::ofstream& f, uint16_t v) {
     f.put((char)(v & 0xff));
     f.put((char)((v >> 8) & 0xff));
 }
-static void writeU32(std::ofstream& f, uint32_t v) {
+[[maybe_unused]] static void writeU32(std::ofstream& f, uint32_t v) {
     f.put((char)(v & 0xff));
     f.put((char)((v >> 8) & 0xff));
     f.put((char)((v >> 16) & 0xff));
     f.put((char)((v >> 24) & 0xff));
 }
-static void writeI16(std::ofstream& f, int16_t v) { writeU16(f, (uint16_t)v); }
+[[maybe_unused]] static void writeI16(std::ofstream& f, int16_t v) { writeU16(f, (uint16_t)v); }
 
 // Synthesize a 16-bit PCM WAV (sine 440 Hz) for use as transcode input.
-static void writeSineWav(const std::string& path, double seconds,
-                         int sampleRate = 44100, int channels = 2) {
+[[maybe_unused]] static void writeSineWav(const std::string& path, double seconds,
+                                          int sampleRate = 44100, int channels = 2) {
     const int32_t nSamples = (int32_t)(seconds * sampleRate);
     const int32_t dataSize = nSamples * channels * 2;
     std::ofstream f(path, std::ios::binary);
@@ -86,16 +102,16 @@ static void writeSineWav(const std::string& path, double seconds,
     assert(f.good());
 }
 
-static bool fileExists(const std::string& path) {
+[[maybe_unused]] static bool fileExists(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     return f.good();
 }
-static long fileSize(const std::string& path) {
+[[maybe_unused]] static long fileSize(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f.good()) return -1;
     return (long)f.tellg();
 }
-static std::string fileMagic(const std::string& path, size_t n) {
+[[maybe_unused]] static std::string fileMagic(const std::string& path, size_t n) {
     std::ifstream f(path, std::ios::binary);
     std::string m(n, '\0');
     f.read(&m[0], (std::streamsize)n);
