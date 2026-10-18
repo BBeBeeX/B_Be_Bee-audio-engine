@@ -23,10 +23,23 @@ else
   if [[ "${OS}" == *"darwin"* ]]; then
     RPATH_FLAG="-Wl,-rpath,@executable_path -Wl,-rpath,@loader_path"
   fi
+  # FFmpeg (libav*) for the "transcode" action; optional — the engine builds
+  # without it and the action reports "not supported" at runtime.
+  FFMPEG_CFLAGS="$(pkg-config --cflags libavformat libavcodec libavutil libswresample 2>/dev/null || true)"
+  FFMPEG_LIBS="$(pkg-config --libs libavformat libavcodec libavutil libswresample 2>/dev/null || true)"
+  FFMPEG_DEFS=""
+  if [[ -n "${FFMPEG_CFLAGS}" ]]; then
+    FFMPEG_DEFS="-DHAVE_LIBAV"
+    echo "FFmpeg found: transcode action enabled"
+  else
+    echo "FFMPEG not found: transcode action will report unsupported at runtime"
+  fi
   ${CXX} -O2 -std=c++17 -I"${ROOT_DIR}/engine" \
     "${ROOT_DIR}/engine/main.cpp" \
     "${ROOT_DIR}/engine/pcm_ring_buffer.cpp" \
+    "${ROOT_DIR}/engine/transcode.cpp" \
+    ${FFMPEG_DEFS} ${FFMPEG_CFLAGS} \
     -o "${BUILD_DIR}/bin/audio-engine" \
-    -pthread -ldl ${RPATH_FLAG}
+    -pthread -ldl ${FFMPEG_LIBS} ${RPATH_FLAG}
   echo "=== Build finished: ${BUILD_DIR}/bin/audio-engine ==="
 fi

@@ -69,6 +69,9 @@ static std::string getExecutableDir() {
 #include "pcm_ring_buffer.hpp"
 #include "fft.hpp"
 #include "json.hpp"
+#include "transcode.hpp"
+#include <map>
+#include <memory>
 
 using namespace audio_engine;
 
@@ -727,6 +730,24 @@ public:
             return;
         }
 
+        // 0. Cancel any running transcode jobs (workers are detached; they
+        // observe the flag, emit their terminal "transcode-result", and
+        // remove themselves from the map). Wait boundedly so the host
+        // reliably receives the terminal event for each job.
+        {
+            std::lock_guard<std::mutex> lock(transcodeMutex);
+            for (auto& kv : transcodeJobs) kv.second->store(true);
+        }
+        for (int i = 0; i < 50; ++i) {
+            bool empty = false;
+            {
+                std::lock_guard<std::mutex> lock(transcodeMutex);
+                empty = transcodeJobs.empty();
+            }
+            if (empty) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
         // 1. Unregister / disable mpv callback first.
         // mpv_set_pcm_callback synchronously waits for any in-flight callback on audio thread to complete!
         if (mpv && mpvLib.set_pcm_callback) {
@@ -770,6 +791,89 @@ public:
         sendJson(resp);
     }
 
+    // Start an async transcode job. Emits "transcode-started" immediately,
+    // then "transcode-progress" events, then a final "transcode-result".
+    // The job runs on a worker thread; "cancelTranscode" sets its cancel flag.
+    void transcode(const JsonValue& cmd) {
+        TranscodeOptions opts;
+        opts.jobId = cmd.get("jobId").asString("");
+        if (opts.jobId.empty()) {
+            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            opts.jobId = "transcode-" + std::to_string(now);
+        }
+        opts.inputPath = cmd.get("input").asString("");
+        opts.outputPath = cmd.get("output").asString("");
+        opts.format = cmd.get("format").asString("mp3");
+        opts.bitrate = cmd.get("bitrate").asString("");
+        opts.sampleRate = cmd.get("sampleRate").asInt(0);
+        opts.channels = cmd.get("channels").asInt(0);
+        opts.startTimeSec = cmd.get("startTime").asNumber(0.0);
+        opts.endTimeSec = cmd.get("endTime").asNumber(0.0);
+
+        if (opts.inputPath.empty() || opts.outputPath.empty()) {
+            JsonValue resp = JsonValue::object();
+            resp["type"] = "transcode-result";
+            resp["jobId"] = opts.jobId;
+            resp["ok"] = false;
+            resp["error"] = "transcode requires 'input' and 'output' paths";
+            sendJson(resp);
+            return;
+        }
+
+        auto cancelFlag = std::make_shared<std::atomic<bool>>(false);
+        {
+            std::lock_guard<std::mutex> lock(transcodeMutex);
+            auto it = transcodeJobs.find(opts.jobId);
+            if (it != transcodeJobs.end()) it->second->store(true); // replace: cancel old
+            transcodeJobs[opts.jobId] = cancelFlag;
+        }
+
+        JsonValue ack = JsonValue::object();
+        ack["type"] = "transcode-started";
+        ack["jobId"] = opts.jobId;
+        sendJson(ack);
+
+        std::thread([this, opts, cancelFlag]() {
+            Transcoder transcoder;
+            TranscodeResult r = transcoder.transcode(
+                opts,
+                [this, jobId = opts.jobId](double progress, double currentSec, double durationSec) {
+                    JsonValue ev = JsonValue::object();
+                    ev["type"] = "transcode-progress";
+                    ev["jobId"] = jobId;
+                    ev["progress"] = progress;
+                    ev["currentTime"] = currentSec;
+                    ev["duration"] = durationSec;
+                    sendJson(ev);
+                },
+                cancelFlag.get());
+
+            {
+                std::lock_guard<std::mutex> lock(transcodeMutex);
+                auto it = transcodeJobs.find(opts.jobId);
+                if (it != transcodeJobs.end() && it->second == cancelFlag)
+                    transcodeJobs.erase(it);
+            }
+
+            JsonValue resp = JsonValue::object();
+            resp["type"] = "transcode-result";
+            resp["jobId"] = opts.jobId;
+            resp["ok"] = r.ok;
+            if (!r.ok) {
+                resp["error"] = r.error;
+                resp["cancelled"] = r.cancelled;
+            }
+            sendJson(resp);
+        }).detach();
+    }
+
+    void cancelTranscode(const std::string& jobId) {
+        std::lock_guard<std::mutex> lock(transcodeMutex);
+        auto it = transcodeJobs.find(jobId);
+        if (it != transcodeJobs.end()) it->second->store(true);
+    }
+
     void sendJson(const JsonValue& val) {
         std::lock_guard<std::mutex> lock(ioMutex);
         std::cout << val.serialize() << "\n" << std::flush;
@@ -783,6 +887,8 @@ private:
     std::mutex engineMutex;
     std::mutex ioMutex;
     std::mutex fftMutex;
+    std::mutex transcodeMutex;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> transcodeJobs;
 
     std::thread eventThread;
     std::thread visualizerThread;
@@ -1323,6 +1429,10 @@ int main(int argc, char* argv[]) {
             app.setVisualizer(cmd.get("enabled").asBool(true), cmd.get("fftSize").asInt(128));
         } else if (action == "getRingBufferStats") {
             app.getRingBufferStats();
+        } else if (action == "transcode") {
+            app.transcode(cmd);
+        } else if (action == "cancelTranscode") {
+            app.cancelTranscode(cmd.get("jobId").asString(""));
         } else if (action == "dispose") {
             app.shutdown();
             return 0;

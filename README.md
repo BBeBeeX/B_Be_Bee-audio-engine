@@ -59,7 +59,8 @@ All multi-platform dynamic libraries (`libmpv.2.dylib`, `libmpv.so.2`, `libmpv-2
 ### Core Components
 
 1. **`engine/`**: Standalone C++17 audio engine.
-   - `main.cpp`: Manages child process lifecycle, listens for NDJSON RPC commands (`play`, `pause`, `stop`, `seek`, `dsp_chain`, `volume`) on `stdin`, dispatches events to `stdout`, and redirects all diagnostics to `stderr`.
+   - `main.cpp`: Manages child process lifecycle, listens for NDJSON RPC commands (`play`, `pause`, `stop`, `seek`, `dsp_chain`, `volume`, `transcode`, `cancelTranscode`) on `stdin`, dispatches events to `stdout`, and redirects all diagnostics to `stderr`.
+   - `transcode.hpp` / `transcode.cpp`: File-to-file audio transcoding (`transcode` action) using the FFmpeg libraries bundled next to libmpv (libavformat/libavcodec/libswresample): demux -> decode -> resample -> encode -> mux, with progress events, trim and cooperative cancellation. Built when FFmpeg dev files are present (`HAVE_LIBAV`); otherwise the action reports "not supported".
    - `pcm_ring_buffer.hpp` / `pcm_ring_buffer.cpp`: Single-Producer Single-Consumer (SPSC) lock-free ring buffer with 64-byte cache-line separation on write/read heads, guaranteeing zero locks and zero allocations in the real-time audio callback thread.
    - `fft.hpp`: Header-only Cooley-Tukey Radix-2 FFT implementation with Hann windowing and exponential temporal smoothing (`opts.smoothingTimeConstant = 0.8f`), converting PCM audio frames into 64 frequency bins (`[0..255]`) and waveform time-domain data.
 2. **`patches/mpv-pcm-tap.patch`**:
