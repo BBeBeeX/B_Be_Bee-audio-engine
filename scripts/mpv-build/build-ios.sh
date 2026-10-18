@@ -319,9 +319,9 @@ default_library = 'shared'
 c_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
 cpp_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
 objc_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
-c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
-cpp_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
-objc_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
+c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
+cpp_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
+objc_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
 
 [binaries]
 c = '${clang_bin}'
@@ -417,7 +417,17 @@ CROSSFILE
     if [ -z "${dylib_out}" ]; then
       dylib_out=$(find build -maxdepth 1 -name "libmpv*.dylib" | head -n 1)
     fi
+    if [ -z "${dylib_out}" ]; then
+      dylib_out=$(find build -name "libmpv*.dylib" | head -n 1)
+    fi
+    if [ -z "${dylib_out}" ] || [ ! -e "${dylib_out}" ]; then
+      echo "ERROR: libmpv dynamic library not found in build directory for ${slice_name}!" >&2
+      ls -la build/
+      exit 1
+    fi
     cp -L "${dylib_out}" "${WORK_DIR}/binaries/mpv_${slice_name}"
+    chmod 0755 "${WORK_DIR}/binaries/mpv_${slice_name}"
+    install_name_tool -id "@rpath/mpv.framework/mpv" "${WORK_DIR}/binaries/mpv_${slice_name}" 2>/dev/null || true
   )
 }
 
@@ -432,6 +442,8 @@ lipo -create \
   "${WORK_DIR}/binaries/mpv_sim_arm64" \
   "${WORK_DIR}/binaries/mpv_sim_x86_64" \
   -output "${WORK_DIR}/binaries/mpv_simulator"
+chmod 0755 "${WORK_DIR}/binaries/mpv_simulator" 2>/dev/null || true
+install_name_tool -id "@rpath/mpv.framework/mpv" "${WORK_DIR}/binaries/mpv_simulator" 2>/dev/null || true
 
 # Assemble target mpv.framework
 echo "=== Assembling Authentic mpv.framework ==="
@@ -441,9 +453,12 @@ mkdir -p "${TARGET_DIR}/Headers"
 # Copy device binary as primary framework executable
 cp "${WORK_DIR}/binaries/mpv_device_arm64" "${TARGET_DIR}/mpv"
 chmod 0755 "${TARGET_DIR}/mpv"
+install_name_tool -id "@rpath/mpv.framework/mpv" "${TARGET_DIR}/mpv" 2>/dev/null || true
 
 # Copy verified client header
-if [ -f "${ROOT_DIR}/engine/mpv_client.h" ]; then
+if [ -f "${WORK_DIR}/mpv-src/include/mpv/client.h" ]; then
+  cp "${WORK_DIR}/mpv-src/include/mpv/client.h" "${TARGET_DIR}/Headers/client.h"
+elif [ -f "${ROOT_DIR}/engine/mpv_client.h" ]; then
   cp "${ROOT_DIR}/engine/mpv_client.h" "${TARGET_DIR}/Headers/client.h"
 fi
 
@@ -477,5 +492,23 @@ PLIST
 
 echo "=== iOS mpv.framework Build Verification ==="
 lipo -info "${TARGET_DIR}/mpv"
-nm "${TARGET_DIR}/mpv" 2>/dev/null | grep -E "mpv_create|mpv_set_pcm_callback"
+otool -D "${TARGET_DIR}/mpv" 2>/dev/null || true
+SYM_COUNT=$(nm -gU "${TARGET_DIR}/mpv" 2>/dev/null | wc -l || echo 0)
+if [ "${SYM_COUNT}" -lt 50 ]; then
+  SYM_COUNT=$(nm "${TARGET_DIR}/mpv" 2>/dev/null | grep -E " [TtSs] " | wc -l || echo 0)
+fi
+echo "Exported symbols count: ${SYM_COUNT}"
+if [ "${SYM_COUNT}" -lt 50 ]; then
+  echo "ERROR: Suspiciously low symbol count (${SYM_COUNT}) in ${TARGET_DIR}/mpv!" >&2
+  exit 1
+fi
+
+REQUIRED_SYMBOLS=("mpv_create" "mpv_initialize" "mpv_destroy" "mpv_command" "mpv_set_pcm_callback")
+for sym in "${REQUIRED_SYMBOLS[@]}"; do
+  if ! nm "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
+    echo "ERROR: Required symbol '${sym}' missing from ${TARGET_DIR}/mpv!" >&2
+    exit 1
+  fi
+  echo "  [OK] Verified symbol: ${sym}"
+done
 echo "=== iOS Genuine mpv.framework successfully staged at ${TARGET_DIR} ==="
