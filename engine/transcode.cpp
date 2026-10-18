@@ -268,7 +268,15 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
         av_channel_layout_default(&inLayout, inNbChannels);
     }
     av_channel_layout_default(&encCtx->ch_layout, outNbChannels);
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    const enum AVSampleFormat *sampleFormats = nullptr;
+    int nbSampleFormats = 0;
+    avcodec_get_supported_config(encCtx.get(), encoder, AV_CODEC_CONFIG_SAMPLE_FORMAT,
+                                 0, (const void **)&sampleFormats, &nbSampleFormats);
+    encCtx->sample_fmt = (sampleFormats && nbSampleFormats > 0) ? sampleFormats[0] : AV_SAMPLE_FMT_FLTP;
+#else
     encCtx->sample_fmt = encoder->sample_fmts ? encoder->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+#endif
     encCtx->time_base = AVRational{1, encCtx->sample_rate};
     const int bitrate = parseBitrate(opts.bitrate);
     if (bitrate > 0) encCtx->bit_rate = bitrate;
