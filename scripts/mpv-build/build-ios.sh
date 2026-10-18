@@ -316,9 +316,9 @@ CROSSFILE
 [built-in options]
 buildtype = 'release'
 default_library = 'shared'
-c_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
-cpp_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
-objc_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
+c_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC', '-Wno-deprecated-declarations']
+cpp_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC', '-Wno-deprecated-declarations']
+objc_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC', '-Wno-deprecated-declarations']
 c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
 cpp_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
 objc_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
@@ -389,6 +389,9 @@ CROSSFILE
       -Dcdda=disabled \
       -Ddvdnav=disabled \
       -Diconv=disabled \
+      -Dzlib=disabled \
+      -Dcplugins=disabled \
+      -Dvideotoolbox-pl=disabled \
       -Dmanpage-build=disabled \
       -Dhtml-build=disabled \
       -Dpdf-build=disabled \
@@ -408,8 +411,7 @@ CROSSFILE
       -Ddvbin=disabled \
       -Degl=disabled \
       -Dvideotoolbox-gl=disabled \
-      -Dswift-build=disabled \
-      -Dc_args='-Wno-deprecated-declarations'
+      -Dswift-build=disabled
 
     ninja -C build
     mkdir -p "${WORK_DIR}/binaries"
