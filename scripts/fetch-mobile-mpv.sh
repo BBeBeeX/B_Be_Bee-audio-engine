@@ -28,18 +28,34 @@ verify_real_android_so() {
 
   # Check that binary is authentic by verifying exported symbol count
   local sym_count=0
-  if command -v nm >/dev/null 2>&1; then
+  if command -v llvm-nm >/dev/null 2>&1; then
+    sym_count=$(llvm-nm -D --defined-only "${so_file}" 2>/dev/null | wc -l || echo 0)
+  fi
+  if [ "${sym_count}" -lt 50 ] && command -v readelf >/dev/null 2>&1; then
+    sym_count=$(readelf -W -s "${so_file}" 2>/dev/null | grep -E "GLOBAL|WEAK" | wc -l || echo 0)
+  fi
+  if [ "${sym_count}" -lt 50 ] && command -v nm >/dev/null 2>&1; then
     sym_count=$(nm -D --defined-only "${so_file}" 2>/dev/null | wc -l || echo 0)
-    if [ "${sym_count}" -lt 50 ]; then
-      echo "ERROR: ${so_file} appears to be an invalid library (${sym_count} symbols)." >&2
-      return 1
-    fi
+  fi
 
-    # Verify critical core client API and PCM tap
-    if ! nm -D --defined-only "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
-      echo "ERROR: ${so_file} is missing mandatory mpv_create symbol." >&2
-      return 1
-    fi
+  if [ "${sym_count}" -lt 50 ]; then
+    echo "ERROR: ${so_file} appears to be an invalid library (${sym_count} symbols)." >&2
+    return 1
+  fi
+
+  # Verify critical core client API and PCM tap
+  local has_create=0
+  if command -v llvm-nm >/dev/null 2>&1 && llvm-nm -D --defined-only "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
+    has_create=1
+  elif command -v readelf >/dev/null 2>&1 && readelf -W -s "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
+    has_create=1
+  elif command -v nm >/dev/null 2>&1 && nm -D --defined-only "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
+    has_create=1
+  fi
+
+  if [ "${has_create}" -eq 0 ]; then
+    echo "ERROR: ${so_file} is missing mandatory mpv_create symbol." >&2
+    return 1
   fi
 
   return 0
@@ -54,9 +70,21 @@ verify_real_ios_framework() {
   fi
 
   if command -v nm >/dev/null 2>&1; then
-    local sym_count=$(nm -defined-only "${bin_file}" 2>/dev/null | wc -l || echo 0)
+    local sym_count=$(nm -gU "${bin_file}" 2>/dev/null | wc -l || echo 0)
+    if [ "${sym_count}" -lt 50 ]; then
+      sym_count=$(nm --defined-only "${bin_file}" 2>/dev/null | wc -l || echo 0)
+    fi
+    if [ "${sym_count}" -lt 50 ]; then
+      sym_count=$(nm "${bin_file}" 2>/dev/null | grep -E " [TtSs] " | wc -l || echo 0)
+    fi
     if [ "${sym_count}" -lt 50 ]; then
       echo "ERROR: ${bin_file} appears to be an invalid framework (${sym_count} symbols)." >&2
+      return 1
+    fi
+
+    # Verify critical core client API
+    if ! nm "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
+      echo "ERROR: ${bin_file} is missing mandatory mpv_create symbol." >&2
       return 1
     fi
   fi

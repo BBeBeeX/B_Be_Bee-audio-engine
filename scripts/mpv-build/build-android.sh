@@ -136,6 +136,9 @@ echo "=== [1/6] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/ffmpeg-src"
 git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
 
+EXTRA_FF_ARGS=""
+[ "${ABI}" = "x86_64" ] && EXTRA_FF_ARGS="--disable-x86asm"
+
 (
   cd "${WORK_DIR}/ffmpeg-src"
   ./configure \
@@ -166,7 +169,8 @@ git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpe
     --enable-gpl \
     --enable-version3 \
     --enable-jni \
-    --enable-mediacodec
+    --enable-mediacodec \
+    ${EXTRA_FF_ARGS}
   make -j"${CORES}"
   make install
 )
@@ -174,7 +178,7 @@ git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpe
 # 4. Build FreeType (Static)
 echo "=== [2/6] Building FreeType (${FREETYPE_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/freetype-src"
-git clone --depth 1 --branch "${FREETYPE_VERSION}" https://gitlab.freedesktop.org/freetype/freetype.git "${WORK_DIR}/freetype-src"
+git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/freetype.git "${WORK_DIR}/freetype-src"
 (
   cd "${WORK_DIR}/freetype-src"
   meson setup build \
@@ -262,7 +266,7 @@ git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libas
 # 8. Build libplacebo (Static, minimal without vulkan/demos/shaderc)
 echo "=== [6/6] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/libplacebo-src"
-git clone --depth 1 --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
+git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
 
 (
   cd "${WORK_DIR}/libplacebo-src"
@@ -309,8 +313,8 @@ buildtype = 'release'
 default_library = 'shared'
 c_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
 cpp_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
-c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++']
-cpp_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++']
+c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++', '-landroid', '-llog', '-lz', '-lm']
+cpp_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++', '-landroid', '-llog', '-lz', '-lm']
 
 [binaries]
 c = '${CC}'
@@ -395,7 +399,10 @@ echo "=== Build Complete: ${OUTPUT_SO} ==="
 file "${OUTPUT_SO}"
 
 # Integrity checks (hundreds of symbols, client symbols, pcm tap callback)
-SYMBOL_COUNT=$(nm -D --defined-only "${OUTPUT_SO}" | wc -l)
+SYMBOL_COUNT=$("${NM}" -D --defined-only "${OUTPUT_SO}" 2>/dev/null | wc -l || true)
+if [ "${SYMBOL_COUNT}" -lt 50 ] && command -v readelf >/dev/null 2>&1; then
+  SYMBOL_COUNT=$(readelf -W -s "${OUTPUT_SO}" 2>/dev/null | grep -E "GLOBAL|WEAK" | wc -l || echo 0)
+fi
 echo "Exported dynamic symbols count: ${SYMBOL_COUNT}"
 if [ "${SYMBOL_COUNT}" -lt 50 ]; then
   echo "ERROR: Symbol count (${SYMBOL_COUNT}) is too low! Authentic libmpv must have hundreds of symbols." >&2
@@ -404,7 +411,16 @@ fi
 
 REQUIRED_SYMBOLS=("mpv_create" "mpv_initialize" "mpv_destroy" "mpv_command" "mpv_set_pcm_callback")
 for sym in "${REQUIRED_SYMBOLS[@]}"; do
-  if ! nm -D --defined-only "${OUTPUT_SO}" | grep -q "[[:space:]]${sym}$"; then
+  found=0
+  if "${NM}" -D --defined-only "${OUTPUT_SO}" 2>/dev/null | grep -q "[[:space:]]${sym}$"; then
+    found=1
+  elif command -v readelf >/dev/null 2>&1 && readelf -W -s "${OUTPUT_SO}" 2>/dev/null | grep -q "[[:space:]]${sym}$"; then
+    found=1
+  elif command -v nm >/dev/null 2>&1 && nm -D --defined-only "${OUTPUT_SO}" 2>/dev/null | grep -q "[[:space:]]${sym}$"; then
+    found=1
+  fi
+
+  if [ "${found}" -eq 0 ]; then
     echo "ERROR: Required symbol '${sym}' missing from ${OUTPUT_SO}!" >&2
     exit 1
   fi

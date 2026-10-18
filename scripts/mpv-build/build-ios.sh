@@ -154,7 +154,7 @@ CROSSFILE
   local freetype_build="${WORK_DIR}/freetype_${slice_name}"
   mkdir -p "${freetype_build}"
   if [ ! -d "${WORK_DIR}/freetype-src" ]; then
-    git clone --depth 1 --branch "${FREETYPE_VERSION}" https://gitlab.freedesktop.org/freetype/freetype.git "${WORK_DIR}/freetype-src"
+    git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/freetype.git "${WORK_DIR}/freetype-src"
   fi
   cp -r "${WORK_DIR}/freetype-src"/* "${freetype_build}/"
 
@@ -260,7 +260,7 @@ CROSSFILE
   local libplacebo_build="${WORK_DIR}/libplacebo_${slice_name}"
   mkdir -p "${libplacebo_build}"
   if [ ! -d "${WORK_DIR}/libplacebo-src" ]; then
-    git clone --depth 1 --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
+    git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
   fi
   cp -r "${WORK_DIR}/libplacebo-src"/* "${libplacebo_build}/"
 
@@ -395,7 +395,12 @@ CROSSFILE
 
     ninja -C build
     mkdir -p "${WORK_DIR}/binaries"
-    cp build/libmpv*.dylib "${WORK_DIR}/binaries/mpv_${slice_name}"
+    local dylib_out
+    dylib_out=$(find build -maxdepth 1 -name "libmpv*.dylib" -type f | head -n 1)
+    if [ -z "${dylib_out}" ]; then
+      dylib_out=$(find build -maxdepth 1 -name "libmpv*.dylib" | head -n 1)
+    fi
+    cp -L "${dylib_out}" "${WORK_DIR}/binaries/mpv_${slice_name}"
   )
 }
 
@@ -455,5 +460,5 @@ PLIST
 
 echo "=== iOS mpv.framework Build Verification ==="
 lipo -info "${TARGET_DIR}/mpv"
-nm -defined-only "${TARGET_DIR}/mpv" | grep -E "mpv_create|mpv_set_pcm_callback"
+nm "${TARGET_DIR}/mpv" 2>/dev/null | grep -E "mpv_create|mpv_set_pcm_callback"
 echo "=== iOS Genuine mpv.framework successfully staged at ${TARGET_DIR} ==="
