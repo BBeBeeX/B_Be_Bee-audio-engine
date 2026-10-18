@@ -103,6 +103,7 @@ pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkg
 
 [host_machine]
 system = 'darwin'
+subsystem = 'ios'
 cpu_family = '${cpu_family}'
 cpu = '${arch}'
 endian = 'little'
@@ -129,6 +130,10 @@ CROSSFILE
       --target-os=darwin \
       --arch="${arch}" \
       --cc="${clang_bin}" \
+      --ar="${ar_bin}" \
+      --nm="${nm_bin}" \
+      --ranlib="${ranlib_bin}" \
+      --strip="${strip_bin}" \
       --extra-cflags="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -fPIC -O3" \
       --extra-ldflags="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}" \
       --disable-programs \
@@ -300,6 +305,8 @@ CROSSFILE
       else
         tr -d '\r' < "${PATCH_FILE}" | git apply --ignore-whitespace --ignore-space-change -
       fi
+      # Remove host macOS /usr/lib and /usr/local/lib search flags that break iOS linking
+      sed -i.bak "s|'-L/usr/lib', '-L/usr/local/lib'||g" meson.build
     )
   fi
   cp -r "${WORK_DIR}/mpv-src"/* "${mpv_build}/"
@@ -312,9 +319,9 @@ default_library = 'shared'
 c_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
 cpp_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
 objc_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-I${slice_prefix}/include', '-O3', '-fPIC']
-c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv']
-cpp_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv']
-objc_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv']
+c_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
+cpp_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
+objc_link_args = ['-arch', '${arch}', '-isysroot', '${sdk_path}', '${min_ver_flag}', '-L${slice_prefix}/lib', '-install_name', '@rpath/mpv.framework/mpv', '-framework', 'AudioToolbox', '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'VideoToolbox', '-framework', 'Security', '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreAudioTypes', '-liconv', '-lz', '-lbz2']
 
 [binaries]
 c = '${clang_bin}'
@@ -330,6 +337,7 @@ pkg_config_libdir = ['${slice_prefix}/lib/pkgconfig', '${slice_prefix}/lib64/pkg
 
 [host_machine]
 system = 'darwin'
+subsystem = 'ios'
 cpu_family = '${cpu_family}'
 cpu = '${arch}'
 endian = 'little'
@@ -344,8 +352,18 @@ CROSSFILE
       --default-library shared \
       -Dlibmpv=true \
       -Dcplayer=false \
-      -Dcoreaudio=enabled \
+      -Dcoreaudio=disabled \
       -Daudiounit=enabled \
+      -Dcocoa=disabled \
+      -Davfoundation=disabled \
+      -Dios-gl=disabled \
+      -Dmacos-10-15-4-features=disabled \
+      -Dmacos-11-features=disabled \
+      -Dmacos-11-3-features=disabled \
+      -Dmacos-12-features=disabled \
+      -Dmacos-cocoa-cb=disabled \
+      -Dmacos-media-player=disabled \
+      -Dmacos-touchbar=disabled \
       -Dalsa=disabled \
       -Dpulse=disabled \
       -Dpipewire=disabled \
@@ -395,7 +413,6 @@ CROSSFILE
 
     ninja -C build
     mkdir -p "${WORK_DIR}/binaries"
-    local dylib_out
     dylib_out=$(find build -maxdepth 1 -name "libmpv*.dylib" -type f | head -n 1)
     if [ -z "${dylib_out}" ]; then
       dylib_out=$(find build -maxdepth 1 -name "libmpv*.dylib" | head -n 1)
