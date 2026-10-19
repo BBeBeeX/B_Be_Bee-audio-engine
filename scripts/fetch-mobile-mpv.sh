@@ -44,12 +44,20 @@ verify_real_android_so() {
   fi
 
   # Verify critical core client API and PCM tap
+  # NOTE: with `set -o pipefail`, `tool | grep -q` misreports "not found":
+  # grep -q exits on the first match, the producer then dies with SIGPIPE (141)
+  # and the whole pipeline fails. Capture the dump into a variable first and
+  # grep that instead (a herestring reads from a temp file: no pipe, no SIGPIPE).
   local has_create=0
-  if command -v llvm-nm >/dev/null 2>&1 && llvm-nm -D --defined-only "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
-    has_create=1
-  elif command -v readelf >/dev/null 2>&1 && readelf -W -s "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
-    has_create=1
-  elif command -v nm >/dev/null 2>&1 && nm -D --defined-only "${so_file}" 2>/dev/null | grep -q "mpv_create"; then
+  local sym_dump=""
+  if command -v llvm-nm >/dev/null 2>&1; then
+    sym_dump="$(llvm-nm -D --defined-only "${so_file}" 2>/dev/null || true)"
+  elif command -v readelf >/dev/null 2>&1; then
+    sym_dump="$(readelf -W -s "${so_file}" 2>/dev/null || true)"
+  elif command -v nm >/dev/null 2>&1; then
+    sym_dump="$(nm -D --defined-only "${so_file}" 2>/dev/null || true)"
+  fi
+  if grep -q "mpv_create" <<< "${sym_dump}"; then
     has_create=1
   fi
 
@@ -83,14 +91,17 @@ verify_real_ios_framework() {
     fi
 
     # Verify critical core client API
+    # NOTE: with `set -o pipefail`, `tool | grep -q` misreports "not found":
+    # grep -q exits on the first match, the producer then dies with SIGPIPE (141)
+    # and the whole pipeline fails. Capture the dumps into variables first and
+    # grep those instead (a herestring reads from a temp file: no pipe, no SIGPIPE).
     local found_create=0
-    if nm -gU "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
-      found_create=1
-    elif nm -g "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
-      found_create=1
-    elif nm "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
-      found_create=1
-    elif strings "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
+    local bin_syms="$(nm -gU "${bin_file}" 2>/dev/null || true)"
+    if [ -z "${bin_syms}" ]; then
+      bin_syms="$(nm "${bin_file}" 2>/dev/null || true)"
+    fi
+    local bin_strs="$(strings "${bin_file}" 2>/dev/null || true)"
+    if grep -q "mpv_create" <<< "${bin_syms}" || grep -q "mpv_create" <<< "${bin_strs}"; then
       found_create=1
     fi
 

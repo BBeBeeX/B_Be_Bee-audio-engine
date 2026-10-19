@@ -505,23 +505,22 @@ if [ "${SYM_COUNT}" -lt 50 ]; then
   exit 1
 fi
 
+# NOTE: with `set -o pipefail`, `tool | grep -q` misreports "not found":
+# grep -q exits on the first match, the producer then dies with SIGPIPE (141)
+# and the whole pipeline fails. Capture the dumps into variables first and
+# grep those instead (a herestring reads from a temp file: no pipe, no SIGPIPE).
+NM_SYMS="$(nm -gU "${TARGET_DIR}/mpv" 2>/dev/null || true)"
+if [ -z "${NM_SYMS}" ]; then
+  NM_SYMS="$(nm "${TARGET_DIR}/mpv" 2>/dev/null || true)"
+fi
+BIN_STRS="$(strings "${TARGET_DIR}/mpv" 2>/dev/null || true)"
 REQUIRED_SYMBOLS=("mpv_create" "mpv_initialize" "mpv_destroy" "mpv_command" "mpv_set_pcm_callback")
 for sym in "${REQUIRED_SYMBOLS[@]}"; do
-  found=0
-  if nm -gU "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
-    found=1
-  elif nm -g "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
-    found=1
-  elif nm "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
-    found=1
-  elif strings "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
-    found=1
-  fi
-
-  if [ "${found}" -eq 0 ]; then
+  if grep -q "${sym}" <<< "${NM_SYMS}" || grep -q "${sym}" <<< "${BIN_STRS}"; then
+    echo "  [OK] Verified symbol: ${sym}"
+  else
     echo "ERROR: Required symbol '${sym}' missing from ${TARGET_DIR}/mpv!" >&2
     exit 1
   fi
-  echo "  [OK] Verified symbol: ${sym}"
 done
 echo "=== iOS Genuine mpv.framework successfully staged at ${TARGET_DIR} ==="
