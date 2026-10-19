@@ -83,7 +83,18 @@ verify_real_ios_framework() {
     fi
 
     # Verify critical core client API
-    if ! nm "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
+    local found_create=0
+    if nm -gU "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
+      found_create=1
+    elif nm -g "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
+      found_create=1
+    elif nm "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
+      found_create=1
+    elif strings "${bin_file}" 2>/dev/null | grep -q "mpv_create"; then
+      found_create=1
+    fi
+
+    if [ "${found_create}" -eq 0 ]; then
       echo "ERROR: ${bin_file} is missing mandatory mpv_create symbol." >&2
       return 1
     fi

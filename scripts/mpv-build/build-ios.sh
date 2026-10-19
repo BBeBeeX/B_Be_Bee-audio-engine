@@ -507,7 +507,18 @@ fi
 
 REQUIRED_SYMBOLS=("mpv_create" "mpv_initialize" "mpv_destroy" "mpv_command" "mpv_set_pcm_callback")
 for sym in "${REQUIRED_SYMBOLS[@]}"; do
-  if ! nm "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
+  found=0
+  if nm -gU "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
+    found=1
+  elif nm -g "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
+    found=1
+  elif nm "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
+    found=1
+  elif strings "${TARGET_DIR}/mpv" 2>/dev/null | grep -q "${sym}"; then
+    found=1
+  fi
+
+  if [ "${found}" -eq 0 ]; then
     echo "ERROR: Required symbol '${sym}' missing from ${TARGET_DIR}/mpv!" >&2
     exit 1
   fi
