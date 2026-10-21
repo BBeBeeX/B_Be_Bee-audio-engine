@@ -82,11 +82,17 @@ echo "[3/6] Packaging macOS arm64..."
 mkdir -p "${STAGING_DIR}/macos-full"
 if [ -f "${ROOT_DIR}/build/bin/audio-engine-darwin" ]; then
   cp "${ROOT_DIR}/build/bin/audio-engine-darwin" "${STAGING_DIR}/macos-full/audio-engine"
+elif [ "${USE_EXISTING_STAGING}" -ne 0 ] && [ -f "${STAGING_DIR}/macos-full/audio-engine" ]; then
+  echo "Reusing existing macos-full audio-engine binary..."
 else
   cp "${ENGINE_BIN}" "${STAGING_DIR}/macos-full/audio-engine"
 fi
 if [ "${USE_EXISTING_STAGING}" -eq 0 ]; then
   cp -a "${LIBMPV_ROOT}/darwin/." "${STAGING_DIR}/macos-full/"
+fi
+if [ -f "${ROOT_DIR}/scripts/bundle-macos-deps.py" ] && [ "$(uname)" = "Darwin" ]; then
+  echo "Bundling macOS dynamic libraries..."
+  python3 "${ROOT_DIR}/scripts/bundle-macos-deps.py" "${STAGING_DIR}/macos-full"
 fi
 tar -czf "${DIST_DIR}/audio-engine-macos-arm64.tar.gz" -C "${STAGING_DIR}/macos-full" .
 
