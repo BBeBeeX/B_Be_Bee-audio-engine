@@ -177,6 +177,10 @@ JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetRingBuf
 JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetState(void* env, void* thiz) { return NULL; }
 JNIEXPORT int JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetFftBinCount(void* env, void* thiz) { return 64; }
 JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetEngineStatus(void* env, void* thiz) { return NULL; }
+JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeTranscode(void* env, void* thiz, void* jobId, void* input, void* output, void* format, void* bitrate, int sampleRate, int channels, double startSec, double endSec) { return NULL; }
+JNIEXPORT int JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeCancelTranscode(void* env, void* thiz, void* jobId) { return 0; }
+JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetTranscodeState(void* env, void* thiz, void* jobId) { return NULL; }
+JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetTranscodeCapabilities(void* env, void* thiz) { return NULL; }
 EOJNI
     cc="${CC:-gcc}"
     command -v "${cc}" >/dev/null 2>&1 || cc="clang"

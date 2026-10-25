@@ -21,6 +21,14 @@ LIBASS_VERSION="0.17.2"
 FREETYPE_VERSION="VER-2-13-2"
 FRIBIDI_VERSION="v1.0.14"
 HARFBUZZ_VERSION="8.3.0"
+# External encoder libraries: enable libmp3lame / libvorbis / libopus so the
+# JNI transcoder (engine/transcode.cpp) can serve the same target matrix as
+# the desktop sidecar (mp3 / ogg / opus) instead of only FFmpeg-native
+# encoders (aac, alac, flac, pcm, wmav2).
+LAME_VERSION="3.100"
+LIBOGG_VERSION="v1.3.5"
+LIBVORBIS_VERSION="v1.3.7"
+LIBOPUS_VERSION="v1.4"
 
 echo "=========================================================="
 echo " BBeBee Android Real libmpv Builder"
@@ -131,13 +139,113 @@ cpu = '${CPU}'
 endian = 'little'
 CROSSFILE
 
-# 3. Build FFmpeg (Static, Audio/MediaCodec Tailored)
-echo "=== [1/6] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
+# 3. External encoder libraries (static): Ogg, LAME, Vorbis, Opus.
+#    These must exist in the prefix BEFORE FFmpeg's configure runs — the
+#    libmp3lame/libvorbis/libopus encoders are only enabled when their
+#    headers are discoverable at configure time.
+
+# 3a. Build libogg (static) — base for Vorbis.
+echo "=== [1/10] Building libogg (${LIBOGG_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/ogg-src"
+git clone --depth 1 --branch "${LIBOGG_VERSION}" https://github.com/xiph/ogg.git "${WORK_DIR}/ogg-src"
+(
+  cd "${WORK_DIR}/ogg-src"
+  ./configure \
+    --host="${NDK_TRIPLE}" \
+    --prefix="${PREFIX_DIR}" \
+    --enable-static \
+    --disable-shared \
+    --with-pic \
+    CC="${CC}" CFLAGS="-O3 -fPIC"
+  make -j"${CORES}"
+  make install
+)
+
+# 3b. Build LAME (static, encoder-only) — the libmp3lame encoder backend.
+echo "=== [2/10] Building LAME (${LAME_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/lame-src"
+if [ -d "${ROOT_DIR}/third-party/src/lame-${LAME_VERSION}" ]; then
+  cp -R "${ROOT_DIR}/third-party/src/lame-${LAME_VERSION}" "${WORK_DIR}/lame-src"
+else
+  curl -fL "https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz" \
+    | tar -xz -C "${WORK_DIR}"
+  mv "${WORK_DIR}/lame-${LAME_VERSION}" "${WORK_DIR}/lame-src"
+fi
+(
+  cd "${WORK_DIR}/lame-src"
+  ./configure \
+    --host="${NDK_TRIPLE}" \
+    --prefix="${PREFIX_DIR}" \
+    --enable-static \
+    --disable-shared \
+    --with-pic \
+    --disable-frontend \
+    --disable-decoder \
+    --disable-gtktest \
+    CC="${CC}" CFLAGS="-O3 -fPIC"
+  make -j"${CORES}"
+  make install
+)
+
+# 3c. Build libvorbis (static) — the libvorbis encoder backend.
+echo "=== [3/10] Building libvorbis (${LIBVORBIS_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/vorbis-src"
+git clone --depth 1 --branch "${LIBVORBIS_VERSION}" https://github.com/xiph/vorbis.git "${WORK_DIR}/vorbis-src"
+(
+  cd "${WORK_DIR}/vorbis-src"
+  ./configure \
+    --host="${NDK_TRIPLE}" \
+    --prefix="${PREFIX_DIR}" \
+    --enable-static \
+    --disable-shared \
+    --with-pic \
+    --disable-docs \
+    --disable-examples \
+    --disable-oggtest \
+    --disable-vorbistest \
+    CC="${CC}" CFLAGS="-O3 -fPIC" LIBS="-lm"
+  make -j"${CORES}"
+  make install
+)
+
+# 3d. Build libopus (static) — the libopus encoder backend.
+echo "=== [4/10] Building libopus (${LIBOPUS_VERSION}) for Android ${ABI} ==="
+mkdir -p "${WORK_DIR}/opus-src"
+git clone --depth 1 --branch "${LIBOPUS_VERSION}" https://github.com/xiph/opus.git "${WORK_DIR}/opus-src"
+(
+  cd "${WORK_DIR}/opus-src"
+  ./configure \
+    --host="${NDK_TRIPLE}" \
+    --prefix="${PREFIX_DIR}" \
+    --enable-static \
+    --disable-shared \
+    --with-pic \
+    --disable-doc \
+    --disable-extra-programs \
+    CC="${CC}" CFLAGS="-O3 -fPIC"
+  make -j"${CORES}"
+  make install
+)
+
+# 4. Build FFmpeg (Static, Audio/MediaCodec Tailored + Transcode Encoders)
+echo "=== [5/10] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/ffmpeg-src"
 git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
 
 EXTRA_FF_ARGS=""
 [ "${ABI}" = "x86_64" ] && EXTRA_FF_ARGS="--disable-x86asm"
+
+# The transcoder (engine/transcode.cpp) targets these containers/encoders.
+# Selective enables on top of --disable-encoders/--disable-muxers keep the
+# static archive small while making every entry of resolveTranscodeTarget()
+# actually resolvable: encoders for the audio codecs, muxers for the
+# containers (adts for raw AAC, ipod/mp4 for m4a, asf for wma).
+TRANSCODE_ENCODERS="aac alac flac pcm_s16le pcm_s24le pcm_f32le wmav2 libmp3lame libvorbis libopus"
+TRANSCODE_MUXERS="adts asf flac ipod mp4 mp3 ogg opus wav"
+ENCODER_FLAGS=""
+for enc in ${TRANSCODE_ENCODERS}; do ENCODER_FLAGS="${ENCODER_FLAGS} --enable-encoder=${enc}"; done
+MUXER_FLAGS=""
+for mux in ${TRANSCODE_MUXERS}; do MUXER_FLAGS="${MUXER_FLAGS} --enable-muxer=${mux}"; done
 
 (
   cd "${WORK_DIR}/ffmpeg-src"
@@ -163,6 +271,8 @@ EXTRA_FF_ARGS=""
     --disable-postproc \
     --disable-encoders \
     --disable-muxers \
+    ${ENCODER_FLAGS} \
+    ${MUXER_FLAGS} \
     --enable-static \
     --disable-shared \
     --enable-pic \
@@ -176,7 +286,7 @@ EXTRA_FF_ARGS=""
 )
 
 # 4. Build FreeType (Static)
-echo "=== [2/6] Building FreeType (${FREETYPE_VERSION}) for Android ${ABI} ==="
+echo "=== [6/10] Building FreeType (${FREETYPE_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/freetype-src"
 git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/freetype.git "${WORK_DIR}/freetype-src"
 (
@@ -196,7 +306,7 @@ git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/f
 )
 
 # 5. Build FriBidi (Static)
-echo "=== [3/6] Building FriBidi (${FRIBIDI_VERSION}) for Android ${ABI} ==="
+echo "=== [7/10] Building FriBidi (${FRIBIDI_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/fribidi-src"
 git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fribidi.git "${WORK_DIR}/fribidi-src"
 
@@ -214,7 +324,7 @@ git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fri
 )
 
 # 6. Build HarfBuzz (Static, Minimal without glib/cairo/icu)
-echo "=== [4/6] Building HarfBuzz (${HARFBUZZ_VERSION}) for Android ${ABI} ==="
+echo "=== [8/10] Building HarfBuzz (${HARFBUZZ_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/harfbuzz-src"
 git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/harfbuzz.git "${WORK_DIR}/harfbuzz-src"
 
@@ -242,7 +352,7 @@ git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/h
 )
 
 # 7. Build libass (Static, minimal OSD requirement for mpv)
-echo "=== [5/6] Building libass (${LIBASS_VERSION}) for Android ${ABI} ==="
+echo "=== [9/10] Building libass (${LIBASS_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/libass-src"
 git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
 (
@@ -264,7 +374,7 @@ git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libas
 )
 
 # 8. Build libplacebo (Static, minimal without vulkan/demos/shaderc)
-echo "=== [6/6] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
+echo "=== [10/10] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/libplacebo-src"
 git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
 
@@ -306,15 +416,47 @@ git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.
     echo "PCM tap patch applied with CRLF normalization."
   fi
 
-  # Crossfile for shared libmpv.so output
+  # mpv v0.41 links a dangling `ra_is_gl` (and friends) into every
+  # gl=disabled build: vo_gpu_next.c and the hwdec shims call into ra_gl.c,
+  # which meson does not compile once GL is off — the resulting libmpv.so
+  # fails dlopen with "cannot locate symbol". This is an audio-only build
+  # (video=no, gl=disabled), so the honest stubs are the "no GL here"
+  # answers: booleans false, handles NULL. Nothing can reach these code
+  # paths without a video output.
+  cat > ra_gl_compat.c <<'EOF'
+#include <stdbool.h>
+#include <stddef.h>
+int ra_is_gl(void *ra) { (void)ra; return 0; }
+int gl_check_extension(const char *extensions, const char *name) {
+    (void)extensions; (void)name; return 0;
+}
+void *ra_gl_get(void *ra) { (void)ra; return NULL; }
+void *ra_create_wrapped_tex(void *ra, void *params, size_t glam_objects) {
+    (void)ra; (void)params; (void)glam_objects; return NULL;
+}
+int eglGetCurrentContext(void) { return 0; }
+int eglGetCurrentDisplay(void) { return 0; }
+void *eglGetProcAddress(const char *name) { (void)name; return NULL; }
+const char *eglQueryString(int dpy, int name) { (void)dpy; (void)name; return NULL; }
+EOF
+  "${CC}" -O2 -fPIC -c ra_gl_compat.c -o ra_gl_compat.o
+  RA_COMPAT_OBJ="${WORK_DIR}/mpv-src/ra_gl_compat.o"
+
+  # Crossfile for shared libmpv.so output.
+  # Link against the shared C++ runtime, NOT -static-libstdc++: the static
+  # libc++abi does not embed __gxx_personality_v0 into libmpv.so, and at
+  # dlopen time nothing else in the app namespace provides it — the engine
+  # degraded to stub mode on a real device because of exactly that dangling
+  # relocation. libc++_shared.so ships in every RN app package (react-native
+  # audio-api and expo both carry it), so a DT_NEEDED entry resolves there.
   cat << CROSSFILE > "${CROSS_FILE}"
 [built-in options]
 buildtype = 'release'
 default_library = 'shared'
 c_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
 cpp_args = ['-I${PREFIX_DIR}/include', '-O3', '-fPIC']
-c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++', '-landroid', '-llog', '-lz', '-lm']
-cpp_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '-static-libstdc++', '-landroid', '-llog', '-lz', '-lm']
+c_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '${RA_COMPAT_OBJ}', '-lc++_shared', '-landroid', '-llog', '-lz', '-lm']
+cpp_link_args = ['-L${PREFIX_DIR}/lib', '-Wl,-z,max-page-size=16384', '-Wl,-soname,libmpv.so', '${RA_COMPAT_OBJ}', '-lc++_shared', '-landroid', '-llog', '-lz', '-lm']
 
 [binaries]
 c = '${CC}'
@@ -428,3 +570,49 @@ for sym in "${REQUIRED_SYMBOLS[@]}"; do
 done
 
 echo "=== Android ${ABI} genuine libmpv.so successfully built and verified! ==="
+
+# 11. Persist the FFmpeg SDK (headers + static libs) for the JNI build.
+#
+# The whole prefix lives under WORK_DIR, which `trap cleanup EXIT` deletes.
+# The JNI bridge (engine/jni) links libavformat/libavcodec/libswresample/
+# libavutil statically to expose the transcoder to React Native, and the
+# static libav archives in turn reference the external encoder libraries,
+# so all of them must outlive this script. Consumers point CMake at
+#   -DBEE_FFMPEG_SDK_DIR="${TARGET_DIR}/ffmpeg-sdk"
+echo "=== Staging FFmpeg SDK for JNI transcode linking ==="
+FF_SDK_DIR="${TARGET_DIR}/ffmpeg-sdk"
+mkdir -p "${FF_SDK_DIR}/include" "${FF_SDK_DIR}/lib"
+
+for hdr in libavcodec libavformat libavutil libswresample libswscale lame opus vorbis ogg; do
+  if [ -d "${PREFIX_DIR}/include/${hdr}" ]; then
+    cp -R "${PREFIX_DIR}/include/${hdr}" "${FF_SDK_DIR}/include/"
+  fi
+done
+
+SDK_LIBS=""
+for lib in libavcodec libavformat libavutil libswresample libswscale \
+           libmp3lame libopus libvorbis libvorbisenc libvorbisfile libogg; do
+  archive="${PREFIX_DIR}/lib/${lib}.a"
+  if [ -f "${archive}" ]; then
+    cp -L "${archive}" "${FF_SDK_DIR}/lib/"
+    SDK_LIBS="${SDK_LIBS} ${lib}.a"
+  fi
+done
+
+if [ ! -f "${FF_SDK_DIR}/lib/libavcodec.a" ]; then
+  echo "ERROR: FFmpeg SDK staging failed — ${FF_SDK_DIR}/lib/libavcodec.a missing!" >&2
+  exit 1
+fi
+cat > "${FF_SDK_DIR}/BUILD_INFO.txt" <<EOF
+FFmpeg: ${FFMPEG_VERSION}
+LAME: ${LAME_VERSION}
+libogg: ${LIBOGG_VERSION}
+libvorbis: ${LIBVORBIS_VERSION}
+libopus: ${LIBOPUS_VERSION}
+ABI: ${ABI}
+NDK triple: ${NDK_TRIPLE}
+Staged archives:${SDK_LIBS}
+EOF
+echo "FFmpeg SDK staged at ${FF_SDK_DIR}:${SDK_LIBS}"
+
+echo "=== Android ${ABI} build pipeline complete (libmpv + FFmpeg SDK). ==="

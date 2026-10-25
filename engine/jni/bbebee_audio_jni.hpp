@@ -34,12 +34,19 @@ struct EngineState {
  * gapless re-bind: the requested file is the one already sounding, and the
  * load must not restart it (a `loadfile replace` of the current file stops
  * the track mid-flight).
+ *
+ * `sampleRate`/`channels`/`bitDepth` are the decoded output parameters
+ * (mpv's `audio-params` properties), best-effort: 0 means "unknown yet" and
+ * the JSON serializes the field away, which the contract spells as optional.
  */
 struct LoadResult {
     bool ok = false;
     double durationMs = 0.0;
     bool resumed = false;
     int64_t endedCount = 0;
+    int sampleRate = 0;
+    int channels = 0;
+    int bitDepth = 0;
 };
 
 class AudioEngineContext {
@@ -79,6 +86,16 @@ public:
     void onPcmChunk(const float* samples, int frames, int channels, int sampleRate);
 
 private:
+    /**
+     * Reconfigure the ring buffer when the tap's format differs from what
+     * the buffer was configured for. Called on the module (JS) thread under
+     * engineMutex_ — never on the audio thread, where `configure` would
+     * stall the callback. Until this runs, the buffer's format guard drops
+     * every tapped frame (a 48 kHz track on a 44.1 kHz-configured buffer
+     * otherwise renders the visualizer permanently flat).
+     */
+    void syncRingBufferFormatLocked();
+
     /** Read a string property; empty when the property has no string value. */
     std::string getStringProp(const char* name);
     /** Read a numeric property via its string form; def when absent. */
@@ -94,6 +111,10 @@ private:
     /* Rising-edge counter of eof transitions, for the JS rollover detector. */
     int64_t endedCount_{ 0 };
     bool lastEof_{ false };
+    /* The tap's observed format, published from the audio thread; the
+     * module thread reconfigures the ring buffer when it differs. */
+    std::atomic<int> tapSampleRate_{ 0 };
+    std::atomic<int> tapChannels_{ 0 };
 };
 
 } // namespace jni
@@ -189,6 +210,50 @@ JNIEXPORT jint JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetFftBinCo
   (JNIEnv *, jobject);
 
 JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetEngineStatus
+  (JNIEnv *, jobject);
+
+/*
+ * Transcoder exports. These are codec-side, not part of the `bbebeeMobileMpv`
+ * playback contract: they deliberately do NOT take g_contextMutex (a running
+ * transcode must never block playback control), they report progress through
+ * atomics read by `nativeGetTranscodeState` — the same pull model every
+ * other answer on this bridge uses — and cancellation is the cooperative
+ * atomic flag the engine's NDJSON `cancelTranscode` action uses.
+ *
+ * URIs: real filesystem paths, with an optional `file://` prefix (stripped
+ * before use). `content://` URIs are resolved to paths by the Kotlin layer
+ * before reaching here, mirroring how the desktop shell resolves URIs for
+ * the sidecar.
+ */
+
+/**
+ * Start a transcode job on a detached worker thread. Answers
+ * `{ok: true, jobId}` once registered (not when finished) or
+ * `{ok: false, error}` synchronously. The job then surfaces through
+ * `nativeGetTranscodeState` until done.
+ */
+JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeTranscode
+  (JNIEnv *, jobject, jstring /*jobId*/, jstring /*input*/, jstring /*output*/,
+   jstring /*format*/, jstring /*bitrate*/, jint /*sampleRate*/, jint /*channels*/,
+   jdouble /*startSec*/, jdouble /*endSec*/);
+
+/** Set the cooperative cancel flag for a running job. True when found. */
+JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeCancelTranscode
+  (JNIEnv *, jobject, jstring /*jobId*/);
+
+/**
+ * `{jobId, found, running, done, ok, cancelled, progress, currentTimeSec,
+ * durationSec, error}` as JSON. Finished jobs stay retrievable for a while
+ * (bounded registry) so a poll that races completion still sees the result.
+ */
+JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetTranscodeState
+  (JNIEnv *, jobject, jstring /*jobId*/);
+
+/**
+ * `{supported, encoders: {<encoder id>: <bool>}}` — which encoders the
+ * linked libavcodec actually carries, keyed by the desktop capability ids.
+ */
+JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetTranscodeCapabilities
   (JNIEnv *, jobject);
 
 #ifdef __cplusplus

@@ -4,6 +4,8 @@
 #include <dlfcn.h>
 #include <cmath>
 #include <chrono>
+#include <map>
+#include <memory>
 #include <thread>
 #include <sstream>
 #include <iomanip>
@@ -11,6 +13,8 @@
 #include <cstring>
 
 #include "../json.hpp"
+#include "../transcode.hpp"
+#include "transcode_caps.hpp"
 
 #define LOG_TAG "BBeBeeAudioJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -92,6 +96,81 @@ static std::string stripFileScheme(const std::string& uri) {
     const std::string prefix = "file://";
     if (uri.rfind(prefix, 0) == 0) return uri.substr(prefix.size());
     return uri;
+}
+
+/**
+ * mpv sample-format name → bit depth (`u8`, `s16(p)`, `s24(p)`, `s32(p)`,
+ * `float(p)`, `double(p)`). 0 when the format is unknown — the contract
+ * reports bit depth as optional, never as a guess.
+ */
+static int audioFormatBitDepth(const std::string& format) {
+    if (format.empty()) return 0;
+    if (format.find("double") != std::string::npos) return 64;
+    if (format.find("float") != std::string::npos) return 32;
+    if (format.rfind("s32", 0) == 0 || format.rfind("u32", 0) == 0) return 32;
+    if (format.rfind("s24", 0) == 0 || format.rfind("u24", 0) == 0) return 24;
+    if (format.rfind("s16", 0) == 0 || format.rfind("u16", 0) == 0) return 16;
+    if (format.rfind("u8", 0) == 0 || format.rfind("s8", 0) == 0) return 8;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Transcode job registry.
+//
+// Deliberately NOT under g_contextMutex / engineMutex_: a running transcode
+// is a minutes-long operation and must never stall playback control, which
+// every engine-context export serializes through. The worker thread owns its
+// job record via shared_ptr, so even a pruned record outlives the thread;
+// progress fields are atomics and the terminal fields are published by the
+// release-store of `done` (single writer per record).
+// ---------------------------------------------------------------------------
+struct TranscodeJob {
+    std::string jobId;
+    std::shared_ptr<std::atomic<bool>> cancelFlag = std::make_shared<std::atomic<bool>>(false);
+    std::atomic<bool> running{ true };
+    std::atomic<bool> done{ false };
+    std::atomic<bool> ok{ false };
+    std::atomic<bool> cancelled{ false };
+    // progress 0..1 scaled by 10000; times in ms
+    std::atomic<int64_t> progressBps{ 0 };
+    std::atomic<int64_t> currentTimeMs{ 0 };
+    std::atomic<int64_t> durationMs{ 0 };
+    /** Epoch ms of completion — finished jobs stay readable for a grace window. */
+    std::atomic<int64_t> doneAtMs{ 0 };
+    std::string error;
+};
+
+static std::mutex g_jobsMutex;
+static std::map<std::string, std::shared_ptr<TranscodeJob>> g_transcodeJobs;
+
+/** Finished jobs vanish after this long; a poll racing completion reads ms
+ *  later and always finds the record, a cancelled-and-restarted job does not
+ *  leak memory across a long session. */
+static constexpr int64_t kFinishedJobRetentionMs = 5 * 60 * 1000;
+
+/** Caller must hold g_jobsMutex — its only caller runs inside the same
+ *  critical section that registers the new job, and std::mutex does not
+ *  recurse. */
+static void pruneFinishedJobsLocked() {
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    for (auto it = g_transcodeJobs.begin(); it != g_transcodeJobs.end();) {
+        const bool expired = it->second->done.load(std::memory_order_acquire) &&
+                             it->second->doneAtMs.load(std::memory_order_acquire) > 0 &&
+                             now - it->second->doneAtMs.load(std::memory_order_acquire) > kFinishedJobRetentionMs;
+        if (expired) {
+            it = g_transcodeJobs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static std::shared_ptr<TranscodeJob> findJob(const std::string& jobId) {
+    std::lock_guard<std::mutex> lock(g_jobsMutex);
+    auto it = g_transcodeJobs.find(jobId);
+    return it != g_transcodeJobs.end() ? it->second : nullptr;
 }
 
 AudioEngineContext::AudioEngineContext()
@@ -238,12 +317,17 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
     // caller builds its progress bar from, so give mpv a moment to probe it.
     // A live stream never grows one — the poll also ends on that shape, with
     // durationMs 0 meaning "unknown", exactly as the contract spells it.
+    // The decoded output parameters ride along on the same poll: they are
+    // optional in the contract and only reported once the audio chain knows
+    // them (0 stays out of the JSON on the JS side).
     for (int i = 0; i < 40; i++) {
-        const double duration = getDoubleProp("duration", 0.0);
-        if (duration > 0.0) {
-            result.durationMs = duration * 1000.0;
-            break;
+        if (result.sampleRate <= 0) result.sampleRate = static_cast<int>(getDoubleProp("audio-params/samplerate", 0.0));
+        if (result.channels <= 0) result.channels = static_cast<int>(getDoubleProp("audio-params/channel-count", 0.0));
+        if (result.durationMs <= 0.0) {
+            const double duration = getDoubleProp("duration", 0.0);
+            if (duration > 0.0) result.durationMs = duration * 1000.0;
         }
+        if (result.durationMs > 0.0 && result.sampleRate > 0 && result.channels > 0) break;
         if (getStringProp("idle-active") == "yes") {
             // The load was refused (dead URL, unsupported file).
             LOGE("loadEx: engine went idle after loadfile — load refused");
@@ -253,6 +337,9 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
     }
     result.ok = true;
     result.endedCount = endedCount_;
+    if (result.sampleRate <= 0) result.sampleRate = static_cast<int>(getDoubleProp("audio-params/samplerate", 0.0));
+    if (result.channels <= 0) result.channels = static_cast<int>(getDoubleProp("audio-params/channel-count", 0.0));
+    result.bitDepth = audioFormatBitDepth(getStringProp("audio-params/format"));
     return result;
 }
 
@@ -386,12 +473,34 @@ void AudioEngineContext::setOutputDevice(const std::string& device) {
 
 void AudioEngineContext::onPcmChunk(const float* samples, int frames, int channels, int sampleRate) {
     if (ringBuffer_ && frames > 0) {
+        // Publish the observed format for the lazy reconfiguration, then
+        // write — which is a no-op while the buffer's format guard sees a
+        // mismatch, until syncRingBufferFormatLocked() runs.
+        tapSampleRate_.store(sampleRate, std::memory_order_relaxed);
+        tapChannels_.store(channels, std::memory_order_relaxed);
         ringBuffer_->write(samples, static_cast<size_t>(frames), channels, sampleRate);
+    }
+}
+
+void AudioEngineContext::syncRingBufferFormatLocked() {
+    if (!ringBuffer_) return;
+    const int sr = tapSampleRate_.load(std::memory_order_relaxed);
+    const int ch = tapChannels_.load(std::memory_order_relaxed);
+    if (sr <= 0 || ch <= 0) return;
+    if (ringBuffer_->getSampleRate() == sr && ringBuffer_->getChannels() == ch) return;
+    // configure() synchronizes with writer and reader quiescence; the tap
+    // drops frames for the brief window, exactly like any format switch.
+    if (ringBuffer_->configure(sr, ch, 8192)) {
+        LOGI("ring buffer reconfigured to %d Hz / %d ch", sr, ch);
     }
 }
 
 bool AudioEngineContext::getSpectrum(uint8_t* outFreqData, uint8_t* outTimeData, size_t binCount, size_t timeCount) {
     if (!ringBuffer_ || !fftProcessor_) return false;
+
+    // The tap's format wins: without this, a 48 kHz track on the 44.1 kHz
+    // default configuration drops every frame and the visualizer sits at zero.
+    syncRingBufferFormatLocked();
 
     size_t reqFrames = fftProcessor_->getFftSize();
     int channels = ringBuffer_->getChannels();
@@ -472,6 +581,20 @@ int AudioEngineContext::getFftBinCount() {
 using namespace bbebee::jni;
 using audio_engine::JsonValue;
 
+/**
+ * Whether this build can transcode at all. Under HAVE_LIBAV the real
+ * Transcoder answers; without it transcode.cpp is not linked, so the
+ * constant false is the only safe answer — every transcode export funnels
+ * through this and degrades exactly like the desktop engine's stub.
+ */
+static bool transcodeSupported() {
+#ifdef HAVE_LIBAV
+    return audio_engine::Transcoder::isSupported();
+#else
+    return false;
+#endif
+}
+
 static std::string jstringToStd(JNIEnv* env, jstring s) {
     if (!s || !env) return std::string();
     const char* chars = env->GetStringUTFChars(s, nullptr);
@@ -500,6 +623,11 @@ static std::string loadResultToJson(const LoadResult& result) {
     v.objVal["durationMs"] = JsonValue(result.durationMs);
     v.objVal["resumed"] = JsonValue(result.resumed);
     v.objVal["endedCount"] = JsonValue(static_cast<int64_t>(result.endedCount));
+    // Optional in the contract: a zero means "unknown", not "zero Hz", and
+    // the field stays absent rather than lying.
+    if (result.sampleRate > 0) v.objVal["sampleRate"] = JsonValue(static_cast<int64_t>(result.sampleRate));
+    if (result.channels > 0) v.objVal["channels"] = JsonValue(static_cast<int64_t>(result.channels));
+    if (result.bitDepth > 0) v.objVal["bitDepth"] = JsonValue(static_cast<int64_t>(result.bitDepth));
     return v.serialize();
 }
 
@@ -521,6 +649,15 @@ JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeDestroy
     if (g_engineContext) {
         delete g_engineContext;
         g_engineContext = nullptr;
+    }
+    // The worker threads hold their job records via shared_ptr and touch
+    // nothing owned here, so they wind down on their own once the
+    // cooperative flags land; the records outlive this call either way.
+    {
+        std::lock_guard<std::mutex> jobsLock(g_jobsMutex);
+        for (auto& entry : g_transcodeJobs) {
+            entry.second->cancelFlag->store(true, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -701,6 +838,163 @@ JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetEngin
     v.objVal["running"] = JsonValue(running);
     v.objVal["mpvAvailable"] = JsonValue(mpvAvail);
     v.objVal["pcmTapAvailable"] = JsonValue(pcmAvail);
+    v.objVal["transcodeAvailable"] = JsonValue(transcodeSupported());
     v.objVal["platform"] = JsonValue("android");
+    return stdToJstring(env, v.serialize());
+}
+
+// ---------------------------------------------------------------------------
+// Transcoder exports
+// ---------------------------------------------------------------------------
+
+static std::string transcodeStateToJson(const TranscodeJob& job) {
+    JsonValue v = JsonValue::object();
+    v.objVal["jobId"] = JsonValue(job.jobId);
+    v.objVal["found"] = JsonValue(true);
+    v.objVal["running"] = JsonValue(job.running.load(std::memory_order_acquire));
+    v.objVal["done"] = JsonValue(job.done.load(std::memory_order_acquire));
+    v.objVal["ok"] = JsonValue(job.ok.load(std::memory_order_acquire));
+    v.objVal["cancelled"] = JsonValue(job.cancelled.load(std::memory_order_acquire));
+    v.objVal["progress"] = JsonValue(static_cast<double>(job.progressBps.load(std::memory_order_acquire)) / 10000.0);
+    v.objVal["currentTimeSec"] = JsonValue(static_cast<double>(job.currentTimeMs.load(std::memory_order_acquire)) / 1000.0);
+    v.objVal["durationSec"] = JsonValue(static_cast<double>(job.durationMs.load(std::memory_order_acquire)) / 1000.0);
+    if (job.done.load(std::memory_order_acquire) && !job.error.empty()) {
+        v.objVal["error"] = JsonValue(job.error);
+    }
+    return v.serialize();
+}
+
+JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeTranscode
+  (JNIEnv *env, jobject, jstring jobIdStr, jstring inputStr, jstring outputStr,
+   jstring formatStr, jstring bitrateStr, jint sampleRate, jint channels,
+   jdouble startSec, jdouble endSec) {
+    if (!transcodeSupported()) {
+        JsonValue v = JsonValue::object();
+        v.objVal["ok"] = JsonValue(false);
+        v.objVal["error"] = JsonValue("transcoding is not supported in this build (no FFmpeg)");
+        return stdToJstring(env, v.serialize());
+    }
+
+    std::string jobId = jstringToStd(env, jobIdStr);
+    if (jobId.empty()) {
+        const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        jobId = "transcode-" + std::to_string(ms);
+    }
+
+    audio_engine::TranscodeOptions opts;
+    opts.jobId = jobId;
+    opts.inputPath = stripFileScheme(jstringToStd(env, inputStr));
+    opts.outputPath = stripFileScheme(jstringToStd(env, outputStr));
+    opts.format = jstringToStd(env, formatStr);
+    if (opts.format.empty()) opts.format = "mp3";
+    opts.bitrate = jstringToStd(env, bitrateStr);
+    opts.sampleRate = static_cast<int>(sampleRate);
+    opts.channels = static_cast<int>(channels);
+    opts.startTimeSec = startSec > 0.0 ? startSec : 0.0;
+    opts.endTimeSec = endSec > 0.0 ? endSec : 0.0;
+
+    JsonValue answer = JsonValue::object();
+    if (opts.inputPath.empty() || opts.outputPath.empty()) {
+        answer.objVal["ok"] = JsonValue(false);
+        answer.objVal["error"] = JsonValue("input and output paths are required");
+        answer.objVal["jobId"] = JsonValue(jobId);
+        return stdToJstring(env, answer.serialize());
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_jobsMutex);
+        auto existing = g_transcodeJobs.find(jobId);
+        if (existing != g_transcodeJobs.end() && !existing->second->done.load(std::memory_order_acquire)) {
+            // Re-registering a live id would orphan the old worker; the
+            // desktop engine cancels-then-replaces, and so do we.
+            existing->second->cancelFlag->store(true, std::memory_order_relaxed);
+        }
+        pruneFinishedJobsLocked();
+        auto job = std::make_shared<TranscodeJob>();
+        job->jobId = jobId;
+        g_transcodeJobs[jobId] = job;
+
+        /*
+         * The pattern engine/main.cpp wraps in NDJSON, translated one-to-one:
+         * a detached worker runs the synchronous Transcoder, streams progress
+         * into the record's atomics, and publishes the terminal answer with
+         * a release-store of `done`. Nothing here touches the engine context,
+         * so playback keeps running — and being scrubbed — underneath.
+         */
+        std::thread([job, opts]() {
+            audio_engine::Transcoder transcoder;
+            const audio_engine::TranscodeResult result = transcoder.transcode(
+                opts,
+                [job](double progress, double currentSec, double durationSec) {
+                    double clamped = progress < 0.0 ? 0.0 : (progress > 1.0 ? 1.0 : progress);
+                    job->progressBps.store(static_cast<int64_t>(clamped * 10000.0), std::memory_order_relaxed);
+                    job->currentTimeMs.store(static_cast<int64_t>(currentSec * 1000.0), std::memory_order_relaxed);
+                    job->durationMs.store(static_cast<int64_t>(durationSec * 1000.0), std::memory_order_relaxed);
+                },
+                job->cancelFlag.get());
+            job->ok.store(result.ok, std::memory_order_relaxed);
+            job->cancelled.store(result.cancelled, std::memory_order_relaxed);
+            job->error = result.error;
+            job->running.store(false, std::memory_order_relaxed);
+            const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+            job->doneAtMs.store(now, std::memory_order_relaxed);
+            job->done.store(true, std::memory_order_release);
+        }).detach();
+    }
+
+    answer.objVal["ok"] = JsonValue(true);
+    answer.objVal["jobId"] = JsonValue(jobId);
+    return stdToJstring(env, answer.serialize());
+}
+
+JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeCancelTranscode
+  (JNIEnv *env, jobject, jstring jobIdStr) {
+    const std::string jobId = jstringToStd(env, jobIdStr);
+    const std::shared_ptr<TranscodeJob> job = findJob(jobId);
+    if (!job || job->done.load(std::memory_order_acquire)) return JNI_FALSE;
+    job->cancelFlag->store(true, std::memory_order_relaxed);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetTranscodeState
+  (JNIEnv *env, jobject, jstring jobIdStr) {
+    const std::string jobId = jstringToStd(env, jobIdStr);
+    const std::shared_ptr<TranscodeJob> job = findJob(jobId);
+    if (!job) {
+        JsonValue v = JsonValue::object();
+        v.objVal["jobId"] = JsonValue(jobId);
+        v.objVal["found"] = JsonValue(false);
+        v.objVal["running"] = JsonValue(false);
+        v.objVal["done"] = JsonValue(false);
+        v.objVal["ok"] = JsonValue(false);
+        v.objVal["cancelled"] = JsonValue(false);
+        v.objVal["progress"] = JsonValue(0.0);
+        v.objVal["currentTimeSec"] = JsonValue(0.0);
+        v.objVal["durationSec"] = JsonValue(0.0);
+        return stdToJstring(env, v.serialize());
+    }
+    return stdToJstring(env, transcodeStateToJson(*job));
+}
+
+JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetTranscodeCapabilities
+  (JNIEnv *env, jobject) {
+#ifdef HAVE_LIBAV
+    const TranscodeCaps caps = probeTranscodeCaps();
+#else
+    // transcode_caps.cpp is only compiled under HAVE_LIBAV; the fallback
+    // answer must be constructible here without touching it.
+    const TranscodeCaps caps;
+#endif
+    JsonValue v = JsonValue::object();
+    v.objVal["supported"] = JsonValue(caps.supported);
+    JsonValue encoders = JsonValue::object();
+    for (const auto& entry : caps.encoders) {
+        encoders.objVal[entry.first] = JsonValue(entry.second);
+    }
+    v.objVal["encoders"] = encoders;
     return stdToJstring(env, v.serialize());
 }
