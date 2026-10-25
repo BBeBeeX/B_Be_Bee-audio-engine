@@ -243,6 +243,8 @@ void AudioEngineContext::destroy() {
     isPlaying_.store(false);
     endedCount_ = 0;
     lastEof_ = false;
+    stopRequested_ = false;
+    hadLoad_ = false;
     ringBuffer_->clear();
 }
 
@@ -275,6 +277,12 @@ bool AudioEngineContext::load(const std::string& uri) {
         return false;
     }
     isPlaying_.store(true);
+    // A fresh load invalidates both error-status markers: the previous file's
+    // eof says nothing about this one, and whatever is idle after this point
+    // is no longer the user's stop.
+    lastEof_ = false;
+    stopRequested_ = false;
+    hadLoad_ = true;
     return true;
 }
 
@@ -312,6 +320,11 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
     }
     isPlaying_.store(true);
     lastEof_ = false;
+    // The command succeeded, so a load "took" even if the probe below catches
+    // a refusal: an engine left idle by a dead URL must read as error, not as
+    // a fresh boot.
+    stopRequested_ = false;
+    hadLoad_ = true;
 
     // `loadfile` answers before the file is open; the duration is what the
     // caller builds its progress bar from, so give mpv a moment to probe it.
@@ -356,6 +369,10 @@ bool AudioEngineContext::append(const std::string& uri, const std::string& heade
         LOGE("loadfile append failed: %s", g_mpv_error_string ? g_mpv_error_string(err) : "unknown");
         return false;
     }
+    // An accepted append is playlist content the engine owes an answer about:
+    // it keeps the error-status markers honest across the playlist boundary.
+    stopRequested_ = false;
+    hadLoad_ = true;
     return true;
 }
 
@@ -391,6 +408,11 @@ void AudioEngineContext::pause() {
 
 void AudioEngineContext::stop() {
     std::lock_guard<std::mutex> lock(engineMutex_);
+    // Recorded before the command: the idle state `stop` produces is
+    // obedience, and getState must never read it as a mid-track failure —
+    // even if the engine is already gone (the flag then only moots an error
+    // the wedged engine would otherwise keep reporting).
+    stopRequested_ = true;
     if (mpvHandle_ && g_mpv_command) {
         const char* cmd[] = { "stop", nullptr };
         g_mpv_command(mpvHandle_, cmd);
@@ -539,7 +561,14 @@ audio_engine::RingBufferStats AudioEngineContext::getRingBufferStats() {
 EngineState AudioEngineContext::getState() {
     std::lock_guard<std::mutex> lock(engineMutex_);
     EngineState state;
-    if (!mpvHandle_) return state;
+    if (!mpvHandle_) {
+        // A context that lost its mpv core after a load had taken is wedged,
+        // not idle — the default answer here had the JS handle poll a
+        // healthy-looking zero forever, with engineStatus still claiming the
+        // engine runs. Report it as what the desktop sidecar would: error.
+        if (hadLoad_) state.status = "error";
+        return state;
+    }
 
     const double position = getDoubleProp("time-pos", -1.0);
     const double duration = getDoubleProp("duration", 0.0);
@@ -554,7 +583,18 @@ EngineState AudioEngineContext::getState() {
     lastEof_ = eof;
 
     if (idle) {
-        state.status = "idle";
+        // Idle after a load, with no user stop and no natural end in between,
+        // is how a mid-track failure (dead URL, decoder error) looks in the
+        // polling model: mpv unloads the file and goes idle, and without
+        // keep-open the eof transient is usually gone before the next poll —
+        // the mirror of the desktop engine's END_FILE reason=error. The JS
+        // handle reads error at position zero as the end of the track, so a
+        // refused load skips instead of stalling the queue.
+        if (hadLoad_ && !lastEof_ && !stopRequested_) {
+            state.status = "error";
+        } else {
+            state.status = "idle";
+        }
     } else if (eof) {
         state.status = "ended";
     } else if (paused) {

@@ -24,7 +24,14 @@ namespace jni {
 struct EngineState {
     double positionMs = 0.0;
     double durationMs = 0.0;
-    // idle | playing | paused | ended
+    // idle | playing | paused | ended | error
+    //
+    // `error` is the polling model's reading of a mid-track failure: the
+    // engine went idle (or lost its mpv core) after a load had taken, with no
+    // user stop and no natural end in between. The desktop sidecar reports
+    // the same failures from MPV_EVENT_END_FILE (reason=error); here the
+    // stop/load bookkeeping reconstructs them, since there is no event loop
+    // to catch END_FILE.
     std::string status = "idle";
     int64_t endedCount = 0;
 };
@@ -111,6 +118,12 @@ private:
     /* Rising-edge counter of eof transitions, for the JS rollover detector. */
     int64_t endedCount_{ 0 };
     bool lastEof_{ false };
+    /* The error-status bookkeeping, guarded by engineMutex_ like everything
+     * else that touches the mpv handle: whether the user asked for a stop
+     * (an idle engine afterwards is obedience, not failure), and whether any
+     * load ever took (an idle engine before that is just a fresh boot). */
+    bool stopRequested_{ false };
+    bool hadLoad_{ false };
     /* The tap's observed format, published from the audio thread; the
      * module thread reconfigures the ring buffer when it differs. */
     std::atomic<int> tapSampleRate_{ 0 };
@@ -201,7 +214,8 @@ JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetSpec
 JNIEXPORT jlongArray JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetRingBufferStats
   (JNIEnv *, jobject);
 
-/** `{positionMs, durationMs, status, endedCount}` as JSON. */
+/** `{positionMs, durationMs, status, endedCount}` as JSON — `status` also
+ *  carries `error` (see EngineState). */
 JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetState
   (JNIEnv *, jobject);
 
