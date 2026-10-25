@@ -81,3 +81,19 @@
 - **Version Bump**: `B_Be_Bee/audio-engine.version.json` bumped from `"v1.1.0"` to `"v1.2.0"`.
 - **Git Status**: Exactly 1 file modified in `B_Be_Bee` (`audio-engine.version.json`), uncommitted.
 - **Fetch Pipeline**: `node scripts/fetch-audio-engine.mjs --mobile` executed successfully, verified extraction into `apps/mobile/third-party/audio-engine`.
+
+---
+
+### Group 6: Full Mobile Binding Surface (JNI contract completion)
+- **Gate Status**: SOURCE COMPLETE (Tier B: host `g++ -fsyntax-only` clean with `-Wall -Wextra` against a stub `jni.h`; Android build verification pending the next CI artifact build — no NDK on this host, per Decision D2).
+- **Why**: the shipped bridge exposed a skeleton (load/play/pause/stop/seek/volume/spectrum/status) with no position/duration reads, no gapless append, no DSP config — and no Java loader or JS binding existed anywhere, so `libbbebee_audio_jni.so` was unreachable even when bundled. The B_Be_Bee main repo documented the full `bbebeeMobileMpv` contract (docs/audio/engine.md) and ran on a JS simulation bridge.
+- **Implementation** (`engine/jni/bbebee_audio_jni.{hpp,cpp}`):
+  - New dlsym: `mpv_get_property_string`, `mpv_free`.
+  - `loadEx(uri, headers)` → `{ok, durationMs, resumed, endedCount}`: gapless re-bind detection (requested file == sounding `path` → no `loadfile replace`), `http-header-fields` option, and a bounded (≤2 s) duration poll — a live stream answers `durationMs: 0` ("unknown"), a refused load answers `ok: false` via `idle-active`.
+  - `append(uri, headers)` → `loadfile append` (gapless playlist boundary).
+  - `getState()` → `{positionMs, durationMs, status, endedCount}` from `time-pos`/`duration`/`pause`/`idle-active`/`eof-reached`, with rising-edge eof counting so a stalled ended file polled forever does not inflate the counter.
+  - `playAt(ms | NaN)`, `seekMs`, `setVolume(0..1 → mpv 0..100)`, `setMuted`, `setOutputDevice`, `setVisualizer(enabled, fftSize)` (sizes the FFT, clears the ring on disable), `setDspConfig(af, replaygain, clip, preamp, fallback)`, `getFftBinCount`, and documented no-ops for the desktop-only `setStreamPlayback`/`setAudioExclusive`.
+  - JSON answers via `engine/json.hpp`; `nativeSeek` (seconds) superseded by `nativeSeekMs` — no shipped consumer of the old ABI existed.
+- **Downstream** (B_Be_Bee main repo): local Expo module `apps/mobile/modules/audio-engine/` (Kotlin loader `org.bbebee.audio.BBeBeeAudioEngine` + `expo.modules.audioengine.BbebeeAudioEngineModule` + JS adapter installing `globalThis.bbebeeMobileMpv` from `boot.ts` with graceful degradation), plus `BBEE_AUDIO_ENGINE_STRICT=1` in the Expo config plugin so release prebuilds fail rather than bundle a build without the engine.
+- **Fallback stub parity**: `scripts/package-release.sh`'s emergency C stub carries the same symbol set.
+- **Remaining**: cut a release so CI rebuilds `libbbebee_audio_jni.so` (both ABIs), run `pnpm fetch:audio-engine --app mobile` in the main repo, rebuild the dev-client APK; then on-device verification of load/state/append/DSP/FFT.

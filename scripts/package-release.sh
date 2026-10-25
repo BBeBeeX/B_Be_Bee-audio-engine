@@ -158,13 +158,24 @@ for ABI in arm64-v8a x86_64; do
 JNIEXPORT int JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeInit(void* env, void* thiz, void* configDir) { return 1; }
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeDestroy(void* env, void* thiz) {}
 JNIEXPORT int JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeLoad(void* env, void* thiz, void* uri) { return 1; }
+JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeLoadEx(void* env, void* thiz, void* uri, void* headers) { return NULL; }
+JNIEXPORT int JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeAppend(void* env, void* thiz, void* uri, void* headers) { return 0; }
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativePlay(void* env, void* thiz) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativePlayAt(void* env, void* thiz, double atMs) {}
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativePause(void* env, void* thiz) {}
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeStop(void* env, void* thiz) {}
-JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSeek(void* env, void* thiz, double sec) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSeekMs(void* env, void* thiz, double ms) {}
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetVolume(void* env, void* thiz, double vol) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetMuted(void* env, void* thiz, int muted) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetDspConfig(void* env, void* thiz, void* af, void* rg, int clip, void* preamp, void* fallback) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetVisualizer(void* env, void* thiz, int enabled, int fftSize) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetOutputDevice(void* env, void* thiz, void* device) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetStreamPlayback(void* env, void* thiz, int playing) {}
+JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetAudioExclusive(void* env, void* thiz, int exclusive) {}
 JNIEXPORT int JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetSpectrum(void* env, void* thiz, void* outFreq, void* outTime) { return 1; }
 JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetRingBufferStats(void* env, void* thiz) { return NULL; }
+JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetState(void* env, void* thiz) { return NULL; }
+JNIEXPORT int JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetFftBinCount(void* env, void* thiz) { return 64; }
 JNIEXPORT void* JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetEngineStatus(void* env, void* thiz) { return NULL; }
 EOJNI
     cc="${CC:-gcc}"
