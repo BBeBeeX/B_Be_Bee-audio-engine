@@ -139,6 +139,25 @@ cpu = '${CPU}'
 endian = 'little'
 CROSSFILE
 
+# The xiph git tags ship only configure.ac — the generated ./configure
+# exists in release tarballs but is not committed to the repos — so it has
+# to be bootstrapped with the autotools provided by the build host
+# (autoconf/automake/libtool, installed explicitly in release.yml for CI).
+bootstrap_autotools() {
+  local src_dir="$1"
+  if [ ! -f "${src_dir}/configure" ]; then
+    if [ ! -f "${src_dir}/autogen.sh" ]; then
+      echo "ERROR: ${src_dir} has neither ./configure nor autogen.sh." >&2
+      exit 1
+    fi
+    (cd "${src_dir}" && NOCONFIGURE=1 ./autogen.sh)
+  fi
+  if [ ! -f "${src_dir}/configure" ]; then
+    echo "ERROR: autogen.sh did not generate ${src_dir}/configure." >&2
+    exit 1
+  fi
+}
+
 # 3. External encoder libraries (static): Ogg, LAME, Vorbis, Opus.
 #    These must exist in the prefix BEFORE FFmpeg's configure runs — the
 #    libmp3lame/libvorbis/libopus encoders are only enabled when their
@@ -148,6 +167,7 @@ CROSSFILE
 echo "=== [1/10] Building libogg (${LIBOGG_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/ogg-src"
 git clone --depth 1 --branch "${LIBOGG_VERSION}" https://github.com/xiph/ogg.git "${WORK_DIR}/ogg-src"
+bootstrap_autotools "${WORK_DIR}/ogg-src"
 (
   cd "${WORK_DIR}/ogg-src"
   ./configure \
@@ -191,6 +211,7 @@ fi
 echo "=== [3/10] Building libvorbis (${LIBVORBIS_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/vorbis-src"
 git clone --depth 1 --branch "${LIBVORBIS_VERSION}" https://github.com/xiph/vorbis.git "${WORK_DIR}/vorbis-src"
+bootstrap_autotools "${WORK_DIR}/vorbis-src"
 (
   cd "${WORK_DIR}/vorbis-src"
   ./configure \
@@ -212,6 +233,7 @@ git clone --depth 1 --branch "${LIBVORBIS_VERSION}" https://github.com/xiph/vorb
 echo "=== [4/10] Building libopus (${LIBOPUS_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/opus-src"
 git clone --depth 1 --branch "${LIBOPUS_VERSION}" https://github.com/xiph/opus.git "${WORK_DIR}/opus-src"
+bootstrap_autotools "${WORK_DIR}/opus-src"
 (
   cd "${WORK_DIR}/opus-src"
   ./configure \
