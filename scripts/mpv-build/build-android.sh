@@ -29,6 +29,19 @@ LAME_VERSION="3.100"
 LIBOGG_VERSION="v1.3.5"
 LIBVORBIS_VERSION="v1.3.7"
 LIBOPUS_VERSION="v1.4"
+# Integrity pins, verified 2026-10-31 (do not invent new values — re-verify
+# the same way before changing them):
+# - LAME_SHA256: sha256 of the tarball at the exact SourceForge URL used
+#   below, computed from two independent SourceForge mirrors, which served
+#   byte-identical files.
+# - LIB*_COMMIT: the peeled commit of each xiph tag, from
+#   `git ls-remote <repo> refs/tags/<tag> refs/tags/<tag>^{}` — the
+#   `^{}` line, not the tag-object line. A shallow `git clone --branch`
+#   checks out the peeled commit, so HEAD must equal it.
+LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
+LIBOGG_COMMIT="e1774cd77f471443541596e09078e78fdc342e4f"
+LIBVORBIS_COMMIT="0657aee69dec8508a0011f47f3b69d7538e9d262"
+LIBOPUS_COMMIT="82ac57d9f1aaf575800cf17373348e45b7ce6c0d"
 
 echo "=========================================================="
 echo " BBeBee Android Real libmpv Builder"
@@ -139,10 +152,52 @@ cpu = '${CPU}'
 endian = 'little'
 CROSSFILE
 
+# Integrity helpers. Every git source below is verified BEFORE any of
+# its code runs: a tag is movable, so "clone --branch <tag>" alone proves
+# nothing — the checked-out HEAD must equal the pinned commit. Likewise
+# a downloaded tarball is hashed before it is extracted.
+verify_git_head() {
+  local src_dir="$1"
+  local expected_commit="$2"
+  local actual_commit
+  actual_commit="$(git -C "${src_dir}" rev-parse HEAD)" || {
+    echo "ERROR: cannot read HEAD of ${src_dir}." >&2
+    exit 1
+  }
+  if [ "${actual_commit}" != "${expected_commit}" ]; then
+    echo "ERROR: ${src_dir} HEAD mismatch: expected ${expected_commit}, got ${actual_commit}." >&2
+    echo "The tag may have moved or the mirror may differ; refusing to build." >&2
+    exit 1
+  fi
+  echo "Verified ${src_dir} HEAD = ${actual_commit}"
+}
+
+verify_sha256() {
+  local file="$1"
+  local expected="$2"
+  local actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "${file}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
+  else
+    echo "ERROR: neither sha256sum nor shasum is available to verify ${file}." >&2
+    exit 1
+  fi
+  if [ "${actual}" != "${expected}" ]; then
+    echo "ERROR: sha256 mismatch for ${file}: expected ${expected}, got ${actual}." >&2
+    exit 1
+  fi
+  echo "Verified sha256 of ${file}"
+}
+
 # The xiph git tags ship only configure.ac — the generated ./configure
 # exists in release tarballs but is not committed to the repos — so it has
 # to be bootstrapped with the autotools provided by the build host
 # (autoconf/automake/libtool, installed explicitly in release.yml for CI).
+# Callers MUST run verify_git_head() on the source tree before calling
+# this: autogen.sh is upstream code, and it must not execute before the
+# source it came from has been verified.
 bootstrap_autotools() {
   local src_dir="$1"
   if [ ! -f "${src_dir}/configure" ]; then
@@ -167,6 +222,7 @@ bootstrap_autotools() {
 echo "=== [1/10] Building libogg (${LIBOGG_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/ogg-src"
 git clone --depth 1 --branch "${LIBOGG_VERSION}" https://github.com/xiph/ogg.git "${WORK_DIR}/ogg-src"
+verify_git_head "${WORK_DIR}/ogg-src" "${LIBOGG_COMMIT}"
 bootstrap_autotools "${WORK_DIR}/ogg-src"
 (
   cd "${WORK_DIR}/ogg-src"
@@ -187,10 +243,19 @@ echo "=== [2/10] Building LAME (${LAME_VERSION}) for Android ${ABI} ==="
 # lame-3.100 root into place; with the target dir pre-created they nest
 # lame-3.100/ inside it and ./configure is not at the top level.
 if [ -d "${ROOT_DIR}/third-party/src/lame-${LAME_VERSION}" ]; then
+  # Vendored tree: a checked-in local source, not a download, so no
+  # tarball hash applies to it. If that tree is ever replaced, this
+  # branch is NOT covered by LAME_SHA256 — that hash covers only the
+  # download branch below.
   cp -R "${ROOT_DIR}/third-party/src/lame-${LAME_VERSION}" "${WORK_DIR}/lame-src"
 else
-  curl -fL "https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz" \
-    | tar -xz -C "${WORK_DIR}"
+  # Download to a file first and verify before extracting: the old
+  # `curl | tar` pipe extracted whatever the mirror served, verified
+  # by nothing but TLS.
+  curl -fL -o "${WORK_DIR}/lame-${LAME_VERSION}.tar.gz" \
+    "https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz"
+  verify_sha256 "${WORK_DIR}/lame-${LAME_VERSION}.tar.gz" "${LAME_SHA256}"
+  tar -xz -C "${WORK_DIR}" -f "${WORK_DIR}/lame-${LAME_VERSION}.tar.gz"
   mv "${WORK_DIR}/lame-${LAME_VERSION}" "${WORK_DIR}/lame-src"
 fi
 (
@@ -213,6 +278,7 @@ fi
 echo "=== [3/10] Building libvorbis (${LIBVORBIS_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/vorbis-src"
 git clone --depth 1 --branch "${LIBVORBIS_VERSION}" https://github.com/xiph/vorbis.git "${WORK_DIR}/vorbis-src"
+verify_git_head "${WORK_DIR}/vorbis-src" "${LIBVORBIS_COMMIT}"
 bootstrap_autotools "${WORK_DIR}/vorbis-src"
 (
   cd "${WORK_DIR}/vorbis-src"
@@ -235,6 +301,7 @@ bootstrap_autotools "${WORK_DIR}/vorbis-src"
 echo "=== [4/10] Building libopus (${LIBOPUS_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/opus-src"
 git clone --depth 1 --branch "${LIBOPUS_VERSION}" https://github.com/xiph/opus.git "${WORK_DIR}/opus-src"
+verify_git_head "${WORK_DIR}/opus-src" "${LIBOPUS_COMMIT}"
 bootstrap_autotools "${WORK_DIR}/opus-src"
 (
   cd "${WORK_DIR}/opus-src"
@@ -458,8 +525,8 @@ void *ra_gl_get(void *ra) { (void)ra; return NULL; }
 void *ra_create_wrapped_tex(void *ra, void *params, size_t glam_objects) {
     (void)ra; (void)params; (void)glam_objects; return NULL;
 }
-int eglGetCurrentContext(void) { return 0; }
-int eglGetCurrentDisplay(void) { return 0; }
+void *eglGetCurrentContext(void) { return NULL; }
+void *eglGetCurrentDisplay(void) { return NULL; }
 void *eglGetProcAddress(const char *name) { (void)name; return NULL; }
 const char *eglQueryString(int dpy, int name) { (void)dpy; (void)name; return NULL; }
 EOF

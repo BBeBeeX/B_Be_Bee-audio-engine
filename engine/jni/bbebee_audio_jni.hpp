@@ -87,7 +87,10 @@ public:
     EngineState getState();
     /** How many frequency bins one spectrum frame carries (fftSize / 2). */
     int getFftBinCount();
-    bool isMpvAvailable() const { return mpvHandle_ != nullptr; }
+    bool isMpvAvailable() const {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        return mpvHandle_ != nullptr;
+    }
     bool isPcmTapAvailable() const { return pcmTapRegistered_.load(); }
 
     void onPcmChunk(const float* samples, int frames, int channels, int sampleRate);
@@ -113,7 +116,9 @@ private:
     std::unique_ptr<audio_engine::FftProcessor> fftProcessor_;
     std::atomic<bool> pcmTapRegistered_{ false };
     std::atomic<bool> isPlaying_{ false };
-    std::mutex engineMutex_;
+    /* Mutable so the const availability query can serialize against
+     * destroy() once JNI exports no longer serialize on g_contextMutex. */
+    mutable std::mutex engineMutex_;
     std::vector<float> readPcmBuffer_;
     /* Rising-edge counter of eof transitions, for the JS rollover detector. */
     int64_t endedCount_{ 0 };

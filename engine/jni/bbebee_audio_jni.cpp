@@ -2,8 +2,10 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
+#include <atomic>
 #include <cmath>
 #include <chrono>
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <thread>
@@ -24,8 +26,19 @@
 namespace bbebee {
 namespace jni {
 
-static AudioEngineContext* g_engineContext = nullptr;
+/* Shared ownership: JNI exports capture a local copy, so an in-flight call
+ * (notably the loadEx probe, which sleeps outside engineMutex_) survives
+ * nativeDestroy resetting the global. The object is destroyed only once
+ * the last in-flight call returns; methods still serialize on
+ * engineMutex_ and treat a null mpvHandle_ as "engine gone". */
+static std::shared_ptr<AudioEngineContext> g_engineContext;
 static std::mutex g_contextMutex;
+
+/** Snapshot the global context under g_contextMutex; may be null. */
+static std::shared_ptr<AudioEngineContext> captureContext() {
+    std::lock_guard<std::mutex> lock(g_contextMutex);
+    return g_engineContext;
+}
 
 // Function pointer signatures for libmpv symbols
 typedef mpv_handle* (*mpv_create_fn)();
@@ -72,7 +85,12 @@ static bool loadLibmpvSymbols() {
     g_mpv_get_property_string = (mpv_get_property_string_fn)dlsym(g_libmpvHandle, "mpv_get_property_string");
     g_mpv_free = (mpv_free_fn)dlsym(g_libmpvHandle, "mpv_free");
 
-    if (!g_mpv_create || !g_mpv_initialize || !g_mpv_destroy || !g_mpv_command) {
+    /* mpv_free is mandatory, not optional: getStringProp() polls several
+     * properties per getState() call, and a missing mpv_free would leak
+     * every returned string for the life of the process. Without it the
+     * engine falls back to mock mode (see initialize()) instead of
+     * running with a slow leak. */
+    if (!g_mpv_create || !g_mpv_initialize || !g_mpv_destroy || !g_mpv_command || !g_mpv_free) {
         LOGE("Failed to resolve mandatory libmpv core symbols");
         dlclose(g_libmpvHandle);
         g_libmpvHandle = nullptr;
@@ -91,12 +109,75 @@ static void pcmCallbackTrampoline(const float* data, int frames, int channels, i
     }
 }
 
-/** `file:///a/b` and `/a/b` name the same file as far as callers care. */
+/** `file:///a/b`, `file://localhost/a/b` and `/a/b` name the same file
+ * as far as callers care. A `file://host/path` form with any other host
+ * keeps its host as the first path component (there is no remote-file
+ * interpretation here); the important property is that the mapping is
+ * consistent, so two spellings of one file compare equal below. */
 static std::string stripFileScheme(const std::string& uri) {
     const std::string prefix = "file://";
-    if (uri.rfind(prefix, 0) == 0) return uri.substr(prefix.size());
-    return uri;
+    if (uri.rfind(prefix, 0) != 0) return uri;
+    std::string rest = uri.substr(prefix.size());
+    if (!rest.empty() && rest[0] == '/') return rest;
+    const std::string localhost = "localhost/";
+    if (rest.rfind(localhost, 0) == 0) return "/" + rest.substr(localhost.size());
+    return rest;
 }
+
+/**
+ * Lexical normalization for same-file comparison only (no filesystem
+ * access, so symlinks and hard links are NOT resolved. That errs in
+ * the safe direction for this guard: lexical variants of one path
+ * (`file:///...`, `/a/./b`, `/a/x/../b`) are caught, distinct files
+ * are never falsely rejected, but a symlink/hardlink alias of the
+ * input still compares unequal and would slip through — a residual
+ * risk, not a false rejection).
+ */
+static std::string normalizeFilePathForComparison(const std::string& raw) {
+    std::string path = stripFileScheme(raw);
+    // A URI query/fragment is not part of a local file path.
+    const size_t cut = path.find_first_of("?#");
+    if (cut != std::string::npos) path = path.substr(0, cut);
+    std::vector<std::string> parts;
+    std::string cur;
+    const bool absolute = !path.empty() && path[0] == '/';
+    for (size_t i = 0; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            if (cur.empty() || cur == ".") {
+                // skip
+            } else if (cur == "..") {
+                if (!parts.empty() && parts.back() != "..") parts.pop_back();
+                else if (!absolute) parts.push_back(cur);
+            } else {
+                parts.push_back(cur);
+            }
+            cur.clear();
+        } else {
+            cur += path[i];
+        }
+    }
+    std::string out = absolute ? "/" : "";
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) out += "/";
+        out += parts[i];
+    }
+    return out;
+}
+
+static bool pathsReferToSameFile(const std::string& a, const std::string& b) {
+    if (a.empty() || b.empty()) return false;
+    return normalizeFilePathForComparison(a) == normalizeFilePathForComparison(b);
+}
+
+/**
+ * No CRLF strip here, on purpose: `headerFields` is a CRLF-joined
+ * multi-header string, and stripping every CR/LF would collapse it into
+ * one line and corrupt multi-header requests. CRLF sanitization belongs
+ * at the adapter, per header value before joining (see
+ * BBeBee's adapter.ts `headersToFields`, which strips CR/LF from each
+ * name and value, then joins with CRLF). Direct JNI callers must do the
+ * same per-value sanitization; this layer must not re-strip the join.
+ */
 
 /**
  * mpv sample-format name → bit depth (`u8`, `s16(p)`, `s24(p)`, `s32(p)`,
@@ -126,6 +207,8 @@ static int audioFormatBitDepth(const std::string& format) {
 // ---------------------------------------------------------------------------
 struct TranscodeJob {
     std::string jobId;
+    /** Normalized output path, for the active-output registry below. */
+    std::string outputPath;
     std::shared_ptr<std::atomic<bool>> cancelFlag = std::make_shared<std::atomic<bool>>(false);
     std::atomic<bool> running{ true };
     std::atomic<bool> done{ false };
@@ -142,6 +225,18 @@ struct TranscodeJob {
 
 static std::mutex g_jobsMutex;
 static std::map<std::string, std::shared_ptr<TranscodeJob>> g_transcodeJobs;
+/** Normalized output path -> jobId for jobs not yet done. Two workers
+ * must never write one destination: the second registration is refused
+ * (see nativeTranscode) instead of racing the first one's truncate. */
+static std::map<std::string, std::string> g_activeTranscodeOutputs;
+/** Detached transcode workers in flight. nativeDestroy cancels them and
+ * waits (bounded) for this count to reach zero; workers never touch the
+ * engine context, only their shared job record, so a timeout still leaves
+ * no dangling context use — only a worker that keeps running to its own
+ * terminal state on a record that outlives destroy. */
+static std::atomic<int> g_transcodeWorkersActive{ 0 };
+static std::mutex g_workersMutex;
+static std::condition_variable g_workersCv;
 
 /** Finished jobs vanish after this long; a poll racing completion reads ms
  *  later and always finds the record, a cancelled-and-restarted job does not
@@ -286,8 +381,22 @@ bool AudioEngineContext::load(const std::string& uri) {
     return true;
 }
 
+/*
+ * Trust boundary for load()/loadEx()/append()/setDspConfig(): the URI,
+ * the `af` lavfi fragment and the header fields are passed to mpv
+ * exactly as the caller supplied them (header fields with each value
+ * already CRLF-sanitized by the adapter before joining). No allowlist
+ * is applied here on purpose: an `af`
+ * allowlist would break legitimate DSP chains and a URI allowlist
+ * would break legitimate playback, so the responsibility sits with the
+ * caller — the Kotlin/JS adapter must only forward values that come
+ * from trusted app settings or the user's own library, never verbatim
+ * from an untrusted source document. If that boundary ever changes,
+ * the allowlist belongs at the adapter, where a header value can still
+ * be sanitized before it is joined into a multi-header string.
+ */
 LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string& headerFields) {
-    std::lock_guard<std::mutex> lock(engineMutex_);
+    std::unique_lock<std::mutex> lock(engineMutex_);
     LoadResult result;
     if (!mpvHandle_ || !g_mpv_command) return result;
 
@@ -308,6 +417,9 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
         return result;
     }
 
+    // headerFields arrives CRLF-joined with each value already sanitized
+    // by the adapter; do not strip CRLF here (that would collapse the
+    // multi-header join into one line).
     if (!headerFields.empty() && g_mpv_set_option_string) {
         g_mpv_set_option_string(mpvHandle_, "http-header-fields", headerFields.c_str());
     }
@@ -325,6 +437,11 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
     // a fresh boot.
     stopRequested_ = false;
     hadLoad_ = true;
+    // The handle this load belongs to. The probe below drops engineMutex_
+    // while it sleeps (see below); if destroy() runs in that window it
+    // nulls mpvHandle_, and the probe must notice and stop instead of
+    // reporting a load on a dead engine as ok.
+    mpv_handle* const handleAtLoad = mpvHandle_;
 
     // `loadfile` answers before the file is open; the duration is what the
     // caller builds its progress bar from, so give mpv a moment to probe it.
@@ -333,20 +450,45 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
     // The decoded output parameters ride along on the same poll: they are
     // optional in the contract and only reported once the audio chain knows
     // them (0 stays out of the JSON on the JS side).
+    //
+    // The lock is held only for each property read, not for the sleep:
+    // the old loop held engineMutex_ for the whole worst-case 2 s probe,
+    // and every control call (play/pause/getState/...) serializes on that
+    // same mutex, so one slow probe stalled all of them. The context
+    // object itself stays alive across the unlocked sleeps because JNI
+    // exports hold it by shared_ptr (see g_engineContext), and the
+    // handle check below is what makes the unlocked window safe.
+    bool probeSatisfied = false;
     for (int i = 0; i < 40; i++) {
+        if (mpvHandle_ != handleAtLoad) return result;
         if (result.sampleRate <= 0) result.sampleRate = static_cast<int>(getDoubleProp("audio-params/samplerate", 0.0));
         if (result.channels <= 0) result.channels = static_cast<int>(getDoubleProp("audio-params/channel-count", 0.0));
         if (result.durationMs <= 0.0) {
             const double duration = getDoubleProp("duration", 0.0);
             if (duration > 0.0) result.durationMs = duration * 1000.0;
         }
-        if (result.durationMs > 0.0 && result.sampleRate > 0 && result.channels > 0) break;
+        if (result.durationMs > 0.0 && result.sampleRate > 0 && result.channels > 0) {
+            probeSatisfied = true;
+            break;
+        }
         if (getStringProp("idle-active") == "yes") {
             // The load was refused (dead URL, unsupported file).
             LOGE("loadEx: engine went idle after loadfile — load refused");
             return result;
         }
+        lock.unlock();
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        lock.lock();
+    }
+    // The loop's last sleep is unchecked: a load refused exactly on the
+    // 2 s boundary used to be reported ok with duration 0. Re-check idle
+    // once, under the lock, before claiming success — but only when the
+    // probe was NOT satisfied: a very short file that loaded, probed and
+    // already ended is idle too, and must not be reclassified as refused.
+    if (mpvHandle_ != handleAtLoad) return result;
+    if (!probeSatisfied && getStringProp("idle-active") == "yes") {
+        LOGE("loadEx: engine went idle after loadfile — load refused");
+        return result;
     }
     result.ok = true;
     result.endedCount = endedCount_;
@@ -360,6 +502,8 @@ bool AudioEngineContext::append(const std::string& uri, const std::string& heade
     std::lock_guard<std::mutex> lock(engineMutex_);
     if (!mpvHandle_ || !g_mpv_command) return false;
 
+    // See loadEx: headerFields is already per-value sanitized by the
+    // adapter; do not strip CRLF here.
     if (!headerFields.empty() && g_mpv_set_option_string) {
         g_mpv_set_option_string(mpvHandle_, "http-header-fields", headerFields.c_str());
     }
@@ -518,6 +662,11 @@ void AudioEngineContext::syncRingBufferFormatLocked() {
 }
 
 bool AudioEngineContext::getSpectrum(uint8_t* outFreqData, uint8_t* outTimeData, size_t binCount, size_t timeCount) {
+    // Serialized here, not by the caller: JNI exports no longer serialize
+    // on g_contextMutex (see g_engineContext), so destroy() could
+    // otherwise run concurrently with this read. No caller holds
+    // engineMutex_ when calling getSpectrum, so this lock cannot recurse.
+    std::lock_guard<std::mutex> lock(engineMutex_);
     if (!ringBuffer_ || !fftProcessor_) return false;
 
     // The tap's format wins: without this, a 48 kHz track on the 44.1 kHz
@@ -552,6 +701,7 @@ bool AudioEngineContext::getSpectrum(uint8_t* outFreqData, uint8_t* outTimeData,
 }
 
 audio_engine::RingBufferStats AudioEngineContext::getRingBufferStats() {
+    std::lock_guard<std::mutex> lock(engineMutex_);
     if (ringBuffer_) {
         return ringBuffer_->getStats();
     }
@@ -638,14 +788,29 @@ static bool transcodeSupported() {
 static std::string jstringToStd(JNIEnv* env, jstring s) {
     if (!s || !env) return std::string();
     const char* chars = env->GetStringUTFChars(s, nullptr);
-    if (!chars) return std::string();
+    if (!chars) {
+        /* A null return means a pending JNI exception (typically OOM).
+         * Clear it here: every caller treats the empty string as "no
+         * value" and continues into further JNI calls, and a pending
+         * exception would make all of those fail opaquely instead. */
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return std::string();
+    }
     std::string out(chars);
     env->ReleaseStringUTFChars(s, chars);
     return out;
 }
 
 static jstring stdToJstring(JNIEnv* env, const std::string& s) {
-    return env ? env->NewStringUTF(s.c_str()) : nullptr;
+    if (!env) return nullptr;
+    jstring out = env->NewStringUTF(s.c_str());
+    if (!out && env->ExceptionCheck()) {
+        /* Same contract as above: null is the failure signal the Java
+         * side already handles; a pending exception must not leak into
+         * the next JNI call on this thread. */
+        env->ExceptionClear();
+    }
+    return out;
 }
 
 static std::string stateToJson(const EngineState& state) {
@@ -673,107 +838,126 @@ static std::string loadResultToJson(const LoadResult& result) {
 
 JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeInit
   (JNIEnv *env, jobject, jstring configDirStr) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) {
-        g_engineContext = new AudioEngineContext();
+    std::shared_ptr<AudioEngineContext> ctx;
+    {
+        std::lock_guard<std::mutex> lock(g_contextMutex);
+        if (!g_engineContext) {
+            g_engineContext = std::make_shared<AudioEngineContext>();
+        }
+        ctx = g_engineContext;
     }
 
     std::string configDir = jstringToStd(env, configDirStr);
 
-    return g_engineContext->initialize(configDir) ? JNI_TRUE : JNI_FALSE;
+    return ctx->initialize(configDir) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeDestroy
   (JNIEnv *, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) {
-        delete g_engineContext;
-        g_engineContext = nullptr;
+    std::shared_ptr<AudioEngineContext> ctx;
+    {
+        std::lock_guard<std::mutex> lock(g_contextMutex);
+        ctx = g_engineContext;
+        g_engineContext.reset();
     }
-    // The worker threads hold their job records via shared_ptr and touch
-    // nothing owned here, so they wind down on their own once the
-    // cooperative flags land; the records outlive this call either way.
+    if (ctx) ctx->destroy();
+    // Cancel every transcode job, then wait — bounded — for the detached
+    // workers to actually exit. The wait holds no lock a worker needs
+    // (workers take g_jobsMutex only briefly at completion), so it
+    // cannot deadlock against them; a worker stuck in a blocking libav
+    // read past the deadline simply keeps running to its own terminal
+    // state on a shared job record that outlives this call, and it never
+    // touches the engine context, so the timeout is safe, not a leak of
+    // a dangling use. The deadline exists so destroy() can never hang
+    // the calling thread on a wedged transcode.
     {
         std::lock_guard<std::mutex> jobsLock(g_jobsMutex);
         for (auto& entry : g_transcodeJobs) {
             entry.second->cancelFlag->store(true, std::memory_order_relaxed);
         }
     }
+    {
+        std::unique_lock<std::mutex> workersLock(g_workersMutex);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        g_workersCv.wait_until(workersLock, deadline, [] {
+            return g_transcodeWorkersActive.load(std::memory_order_acquire) == 0;
+        });
+    }
 }
 
 JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeLoad
   (JNIEnv *env, jobject, jstring uriStr) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) return JNI_FALSE;
+    auto ctx = captureContext();
+    if (!ctx) return JNI_FALSE;
     const std::string uri = jstringToStd(env, uriStr);
-    return g_engineContext->load(uri) ? JNI_TRUE : JNI_FALSE;
+    return ctx->load(uri) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeLoadEx
   (JNIEnv *env, jobject, jstring uriStr, jstring headersStr) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) return stdToJstring(env, loadResultToJson(LoadResult()));
+    auto ctx = captureContext();
+    if (!ctx) return stdToJstring(env, loadResultToJson(LoadResult()));
     const std::string uri = jstringToStd(env, uriStr);
     const std::string headers = jstringToStd(env, headersStr);
-    return stdToJstring(env, loadResultToJson(g_engineContext->loadEx(uri, headers)));
+    return stdToJstring(env, loadResultToJson(ctx->loadEx(uri, headers)));
 }
 
 JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeAppend
   (JNIEnv *env, jobject, jstring uriStr, jstring headersStr) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) return JNI_FALSE;
+    auto ctx = captureContext();
+    if (!ctx) return JNI_FALSE;
     const std::string uri = jstringToStd(env, uriStr);
     const std::string headers = jstringToStd(env, headersStr);
-    return g_engineContext->append(uri, headers) ? JNI_TRUE : JNI_FALSE;
+    return ctx->append(uri, headers) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativePlay
   (JNIEnv *, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->play();
+    auto ctx = captureContext();
+    if (ctx) ctx->play();
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativePlayAt
   (JNIEnv *, jobject, jdouble atMs) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->playAt(atMs, !std::isnan(atMs));
+    auto ctx = captureContext();
+    if (ctx) ctx->playAt(atMs, !std::isnan(atMs));
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativePause
   (JNIEnv *, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->pause();
+    auto ctx = captureContext();
+    if (ctx) ctx->pause();
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeStop
   (JNIEnv *, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->stop();
+    auto ctx = captureContext();
+    if (ctx) ctx->stop();
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSeekMs
   (JNIEnv *, jobject, jdouble ms) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->seekMs(ms);
+    auto ctx = captureContext();
+    if (ctx) ctx->seekMs(ms);
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetVolume
   (JNIEnv *, jobject, jdouble volume01) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->setVolume(volume01);
+    auto ctx = captureContext();
+    if (ctx) ctx->setVolume(volume01);
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetMuted
   (JNIEnv *, jobject, jboolean muted) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->setMuted(muted == JNI_TRUE);
+    auto ctx = captureContext();
+    if (ctx) ctx->setMuted(muted == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetDspConfig
   (JNIEnv *env, jobject, jstring afStr, jstring replaygainStr, jboolean clip, jstring preampStr, jstring fallbackStr) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) return;
-    g_engineContext->setDspConfig(
+    auto ctx = captureContext();
+    if (!ctx) return;
+    ctx->setDspConfig(
         jstringToStd(env, afStr),
         jstringToStd(env, replaygainStr),
         clip == JNI_TRUE,
@@ -783,14 +967,14 @@ JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetDspConfi
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetVisualizer
   (JNIEnv *, jobject, jboolean enabled, jint fftSize) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->setVisualizer(enabled == JNI_TRUE, static_cast<int>(fftSize));
+    auto ctx = captureContext();
+    if (ctx) ctx->setVisualizer(enabled == JNI_TRUE, static_cast<int>(fftSize));
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetOutputDevice
   (JNIEnv *env, jobject, jstring deviceStr) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (g_engineContext) g_engineContext->setOutputDevice(jstringToStd(env, deviceStr));
+    auto ctx = captureContext();
+    if (ctx) ctx->setOutputDevice(jstringToStd(env, deviceStr));
 }
 
 JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetStreamPlayback
@@ -806,8 +990,8 @@ JNIEXPORT void JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeSetAudioExc
 
 JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetSpectrum
   (JNIEnv *env, jobject, jbyteArray outFreqArr, jbyteArray outTimeArr) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) return JNI_FALSE;
+    auto ctx = captureContext();
+    if (!ctx) return JNI_FALSE;
 
     jsize freqLen = outFreqArr ? env->GetArrayLength(outFreqArr) : 0;
     jsize timeLen = outTimeArr ? env->GetArrayLength(outTimeArr) : 0;
@@ -815,7 +999,7 @@ JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetSpec
     std::vector<uint8_t> freqBuf(freqLen > 0 ? freqLen : 1);
     std::vector<uint8_t> timeBuf(timeLen > 0 ? timeLen : 1);
 
-    bool ok = g_engineContext->getSpectrum(
+    bool ok = ctx->getSpectrum(
         freqLen > 0 ? freqBuf.data() : nullptr,
         timeLen > 0 ? timeBuf.data() : nullptr,
         freqLen, timeLen
@@ -835,13 +1019,13 @@ JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetSpec
 
 JNIEXPORT jlongArray JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetRingBufferStats
   (JNIEnv *env, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
+    auto ctx = captureContext();
     jlongArray result = env->NewLongArray(5);
     if (!result) return nullptr;
 
     jlong stats[5] = { 0, 0, 0, 0, 0 };
-    if (g_engineContext) {
-        auto s = g_engineContext->getRingBufferStats();
+    if (ctx) {
+        auto s = ctx->getRingBufferStats();
         stats[0] = static_cast<jlong>(s.totalFramesWritten);
         stats[1] = static_cast<jlong>(s.totalFramesRead);
         stats[2] = static_cast<jlong>(s.droppedFrames);
@@ -855,24 +1039,24 @@ JNIEXPORT jlongArray JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetRi
 
 JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetState
   (JNIEnv *env, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) return stdToJstring(env, stateToJson(EngineState()));
-    return stdToJstring(env, stateToJson(g_engineContext->getState()));
+    auto ctx = captureContext();
+    if (!ctx) return stdToJstring(env, stateToJson(EngineState()));
+    return stdToJstring(env, stateToJson(ctx->getState()));
 }
 
 JNIEXPORT jint JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetFftBinCount
   (JNIEnv *, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    if (!g_engineContext) return 64;
-    return static_cast<jint>(g_engineContext->getFftBinCount());
+    auto ctx = captureContext();
+    if (!ctx) return 64;
+    return static_cast<jint>(ctx->getFftBinCount());
 }
 
 JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetEngineStatus
   (JNIEnv *env, jobject) {
-    std::lock_guard<std::mutex> lock(g_contextMutex);
-    bool running = g_engineContext != nullptr;
-    bool mpvAvail = g_engineContext ? g_engineContext->isMpvAvailable() : false;
-    bool pcmAvail = g_engineContext ? g_engineContext->isPcmTapAvailable() : false;
+    auto ctx = captureContext();
+    bool running = ctx != nullptr;
+    bool mpvAvail = ctx ? ctx->isMpvAvailable() : false;
+    bool pcmAvail = ctx ? ctx->isPcmTapAvailable() : false;
 
     JsonValue v = JsonValue::object();
     v.objVal["running"] = JsonValue(running);
@@ -917,10 +1101,16 @@ JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeTranscod
 
     std::string jobId = jstringToStd(env, jobIdStr);
     if (jobId.empty()) {
+        // A bare millisecond timestamp collides when two callers fire in
+        // the same millisecond — and a collision used to mean the second
+        // job cancelled-and-replaced the first. The monotonic counter
+        // makes generated ids unique within the process lifetime.
+        static std::atomic<unsigned long> generatedJobCounter{ 0 };
         const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
-        jobId = "transcode-" + std::to_string(ms);
+        jobId = "transcode-" + std::to_string(ms) + "-" +
+                std::to_string(generatedJobCounter.fetch_add(1, std::memory_order_relaxed));
     }
 
     audio_engine::TranscodeOptions opts;
@@ -942,19 +1132,57 @@ JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeTranscod
         answer.objVal["jobId"] = JsonValue(jobId);
         return stdToJstring(env, answer.serialize());
     }
+    // M1: input == output would truncate the source mid-decode (the
+    // transcoder opens the input, then opens the output for writing).
+    // Reject before any worker starts, on the normalized spellings, so
+    // `file:///a/b` vs `/a/b` vs `file://localhost/a/b` all match.
+    // This check lives only here, not also in Transcoder::transcode:
+    // the desktop NDJSON path in engine/main.cpp calls the transcoder
+    // directly and keeps its own contract, so a second check there
+    // would be a duplicate guard with a different error surface.
+    // (That path therefore still needs its own same-path guard if the
+    // desktop caller can ever pass equal paths — see the report.)
+    if (pathsReferToSameFile(opts.inputPath, opts.outputPath)) {
+        answer.objVal["ok"] = JsonValue(false);
+        answer.objVal["error"] = JsonValue("input and output paths must differ");
+        answer.objVal["jobId"] = JsonValue(jobId);
+        return stdToJstring(env, answer.serialize());
+    }
+    const std::string normalizedOutput = normalizeFilePathForComparison(opts.outputPath);
 
     {
         std::lock_guard<std::mutex> lock(g_jobsMutex);
         auto existing = g_transcodeJobs.find(jobId);
         if (existing != g_transcodeJobs.end() && !existing->second->done.load(std::memory_order_acquire)) {
-            // Re-registering a live id would orphan the old worker; the
-            // desktop engine cancels-then-replaces, and so do we.
-            existing->second->cancelFlag->store(true, std::memory_order_relaxed);
+            // M3: a live jobId is refused, not cancelled-and-replaced.
+            // Replacing left the old worker writing until its next
+            // cancel check while the new worker truncated the same
+            // output — two writers, one file, unpredictable result.
+            // The caller must cancel (nativeCancelTranscode) and wait
+            // for done, or use a fresh id.
+            answer.objVal["ok"] = JsonValue(false);
+            answer.objVal["error"] = JsonValue("transcode job '" + jobId + "' is already running");
+            answer.objVal["jobId"] = JsonValue(jobId);
+            return stdToJstring(env, answer.serialize());
+        }
+        auto outputOwner = g_activeTranscodeOutputs.find(normalizedOutput);
+        if (outputOwner != g_activeTranscodeOutputs.end()) {
+            // Same-output concurrency, by path rather than by id: a
+            // different jobId writing the same destination is the same
+            // two-writer hazard, so it is refused with the owner named.
+            answer.objVal["ok"] = JsonValue(false);
+            answer.objVal["error"] = JsonValue("output '" + opts.outputPath +
+                "' is already being written by transcode job '" + outputOwner->second + "'");
+            answer.objVal["jobId"] = JsonValue(jobId);
+            return stdToJstring(env, answer.serialize());
         }
         pruneFinishedJobsLocked();
         auto job = std::make_shared<TranscodeJob>();
         job->jobId = jobId;
+        job->outputPath = normalizedOutput;
         g_transcodeJobs[jobId] = job;
+        g_activeTranscodeOutputs[normalizedOutput] = jobId;
+        g_transcodeWorkersActive.fetch_add(1, std::memory_order_relaxed);
 
         /*
          * The pattern engine/main.cpp wraps in NDJSON, translated one-to-one:
@@ -982,7 +1210,24 @@ JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeTranscod
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count();
             job->doneAtMs.store(now, std::memory_order_relaxed);
+            // Release the output path before publishing done: a caller
+            // polling for done and immediately reusing the destination
+            // must never race this worker's last write, and the worker
+            // performs no file writes after this point.
+            {
+                std::lock_guard<std::mutex> lock(g_jobsMutex);
+                auto it = g_activeTranscodeOutputs.find(job->outputPath);
+                if (it != g_activeTranscodeOutputs.end() && it->second == job->jobId) {
+                    g_activeTranscodeOutputs.erase(it);
+                }
+            }
             job->done.store(true, std::memory_order_release);
+            // Last: decrement + notify, so nativeDestroy's bounded wait
+            // only returns once the record above is fully published.
+            if (g_transcodeWorkersActive.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                std::lock_guard<std::mutex> workersLock(g_workersMutex);
+                g_workersCv.notify_all();
+            }
         }).detach();
     }
 

@@ -204,6 +204,84 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     if (opts.inputPath.empty()) return fail("empty input path");
     if (opts.outputPath.empty()) return fail("empty output path");
 
+    // Same-path guard, here in the shared Transcoder entry so it covers
+    // both the JNI path and the desktop NDJSON path (the JNI layer has
+    // its own identical check as defense in depth). Lexical only, so
+    // symlink/hardlink aliases still slip through — but distinct files
+    // are never falsely rejected, and without this check a same-path
+    // job would rename its transcoded temp file over the source.
+    {
+        auto normalize = [](std::string p) {
+            const std::string prefix = "file://";
+            if (p.rfind(prefix, 0) == 0) {
+                std::string rest = p.substr(prefix.size());
+                if (!rest.empty() && rest[0] == '/') p = rest;
+                else if (rest.rfind("localhost/", 0) == 0) p = "/" + rest.substr(10);
+                else p = rest;
+            }
+            const size_t cut = p.find_first_of("?#");
+            if (cut != std::string::npos) p = p.substr(0, cut);
+            const bool absolute = !p.empty() && p[0] == '/';
+            std::vector<std::string> parts;
+            std::string cur;
+            for (size_t i = 0; i <= p.size(); ++i) {
+                if (i == p.size() || p[i] == '/') {
+                    if (cur.empty() || cur == ".") {
+                        // skip
+                    } else if (cur == "..") {
+                        if (!parts.empty() && parts.back() != "..") parts.pop_back();
+                        else if (!absolute) parts.push_back(cur);
+                    } else {
+                        parts.push_back(cur);
+                    }
+                    cur.clear();
+                } else {
+                    cur += p[i];
+                }
+            }
+            std::string out = absolute ? "/" : "";
+            for (size_t i = 0; i < parts.size(); ++i) {
+                if (i) out += "/";
+                out += parts[i];
+            }
+            return out;
+        };
+        if (normalize(opts.inputPath) == normalize(opts.outputPath))
+            return fail("input and output paths must differ");
+    }
+
+    // M2: never write the destination directly. The pipeline below
+    // truncates its output file on open, so a failure or cancel halfway
+    // used to leave a partial file at the destination — and worse, it
+    // destroyed a pre-existing file there. Instead everything goes to
+    // a sibling temp file; only a fully written, trailer-closed output
+    // is renamed into place (same directory, so the rename is atomic
+    // on POSIX). Any early return destroys this guard, which deletes
+    // the temp file; a pre-existing destination is untouched on failure.
+    // The temp name is derived from the (caller-controlled) jobId, so
+    // it is sanitized to one path component; distinct jobs also get
+    // distinct temp files, and the JNI layer already refuses two live
+    // jobs on one destination.
+    std::string safeJobId;
+    for (char c : opts.jobId) {
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        safeJobId += ok ? c : '_';
+    }
+    const std::string tempOutputPath =
+        opts.outputPath + ".tmp-" + (safeJobId.empty() ? std::string("job") : safeJobId);
+    struct TempOutputGuard {
+        std::string temp;
+        bool committed = false;
+        ~TempOutputGuard() {
+            if (!committed) std::remove(temp.c_str());
+        }
+    };
+    TempOutputGuard tempGuard{ tempOutputPath, false };
+    // The muxer below writes here; user-facing errors still name the
+    // final destination, not the temp file.
+    const std::string& actualOutputPath = tempOutputPath;
+
     TranscodeTarget target = resolveTranscodeTarget(opts.format);
     if (!target.valid) return fail(target.error);
 
@@ -306,7 +384,7 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     // --- Output muxer ---
     AVFormatContext* ofmtRaw = nullptr;
     if (avformat_alloc_output_context2(&ofmtRaw, nullptr, target.container.c_str(),
-                                        opts.outputPath.c_str()) < 0 ||
+                                        actualOutputPath.c_str()) < 0 ||
         !ofmtRaw)
         return fail("cannot allocate output context for: " + target.container);
     std::unique_ptr<AVFormatContext, FormatOutputDeleter> ofmt(ofmtRaw);
@@ -318,7 +396,7 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     outStream->time_base = encCtx->time_base;
 
     if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open(&ofmt->pb, opts.outputPath.c_str(), AVIO_FLAG_WRITE) < 0)
+        if (avio_open(&ofmt->pb, actualOutputPath.c_str(), AVIO_FLAG_WRITE) < 0)
             return fail("cannot open output: " + opts.outputPath);
     }
     if (avformat_write_header(ofmt.get(), nullptr) < 0)
@@ -501,6 +579,19 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     }
 
     if (av_write_trailer(ofmt.get()) < 0) return fail("cannot write trailer");
+
+    // Close the muxer (flushing the file) before the rename, then move
+    // the completed temp file into place. The guard's destructor runs
+    // on the fail() return below, deleting the temp file, so a failed
+    // rename leaves neither a partial destination nor a temp behind.
+    // NOFILE muxers never created a file, so there is nothing to move.
+    const bool outputFileOpened = !(ofmt->oformat->flags & AVFMT_NOFILE);
+    ofmt.reset();
+    if (outputFileOpened) {
+        if (std::rename(tempOutputPath.c_str(), opts.outputPath.c_str()) != 0)
+            return fail("cannot move completed output into place: " + opts.outputPath);
+    }
+    tempGuard.committed = true;
 
     reportProgress(durationSec > 0.0 ? durationSec : -1.0);
     result.ok = true;
