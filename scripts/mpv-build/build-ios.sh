@@ -4,7 +4,7 @@ set -euo pipefail
 # ==============================================================================
 # BBeBee Audio Engine - iOS Real mpv Cross-Compilation Script
 # Targets: device (arm64), simulator (arm64, x86_64)
-# Toolchain: Apple Clang / Xcode SDK (iOS 15.0+)
+# Toolchain: Apple Clang / Xcode SDK (iOS 16.0+)
 # Audio Backends: AudioUnit / CoreAudio
 # ==============================================================================
 
@@ -434,9 +434,9 @@ CROSSFILE
 }
 
 # Build the 3 standard iOS slices
-build_slice "device_arm64" "arm64" "iphoneos" "${IPHONEOS_SDK}" "-miphoneos-version-min=15.0"
-build_slice "sim_arm64" "arm64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=15.0"
-build_slice "sim_x86_64" "x86_64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=15.0"
+build_slice "device_arm64" "arm64" "iphoneos" "${IPHONEOS_SDK}" "-miphoneos-version-min=16.0"
+build_slice "sim_arm64" "arm64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=16.0"
+build_slice "sim_x86_64" "x86_64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=16.0"
 
 # Combine simulator slices into universal binary
 echo "=== Creating Universal Simulator mpv Binary ==="
@@ -487,7 +487,7 @@ cat << PLIST > "${TARGET_DIR}/Info.plist"
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>MinimumOSVersion</key>
-    <string>15.0</string>
+    <string>16.0</string>
 </dict>
 </plist>
 PLIST

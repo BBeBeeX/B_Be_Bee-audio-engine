@@ -27,11 +27,11 @@ IPHONESIM_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 
 echo "=== Compiling iOS Device (arm64) ==="
 xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "${IPHONEOS_SDK}" \
-  -miphoneos-version-min=15.0 -std=c++17 -fobjc-arc \
+  -miphoneos-version-min=16.0 -std=c++17 -fobjc-arc \
   -I"${ROOT_DIR}/engine" \
   -c "${ROOT_DIR}/engine/pcm_ring_buffer.cpp" -o "${BUILD_DIR}/device/pcm_ring_buffer.o"
 xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "${IPHONEOS_SDK}" \
-  -miphoneos-version-min=15.0 -std=c++17 -fobjc-arc \
+  -miphoneos-version-min=16.0 -std=c++17 -fobjc-arc \
   -I"${ROOT_DIR}/engine" \
   -c "${ROOT_DIR}/engine/ios/BBeBeeAudioBridge.mm" -o "${BUILD_DIR}/device/BBeBeeAudioBridge.o"
 libtool -static -o "${BUILD_DIR}/device/libBBeBeeAudioBridge.a" \
@@ -39,11 +39,11 @@ libtool -static -o "${BUILD_DIR}/device/libBBeBeeAudioBridge.a" \
 
 echo "=== Compiling iOS Simulator (arm64) ==="
 xcrun --sdk iphonesimulator clang++ -arch arm64 -isysroot "${IPHONESIM_SDK}" \
-  -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+  -mios-simulator-version-min=16.0 -std=c++17 -fobjc-arc \
   -I"${ROOT_DIR}/engine" \
   -c "${ROOT_DIR}/engine/pcm_ring_buffer.cpp" -o "${BUILD_DIR}/sim-arm64/pcm_ring_buffer.o"
 xcrun --sdk iphonesimulator clang++ -arch arm64 -isysroot "${IPHONESIM_SDK}" \
-  -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+  -mios-simulator-version-min=16.0 -std=c++17 -fobjc-arc \
   -I"${ROOT_DIR}/engine" \
   -c "${ROOT_DIR}/engine/ios/BBeBeeAudioBridge.mm" -o "${BUILD_DIR}/sim-arm64/BBeBeeAudioBridge.o"
 libtool -static -o "${BUILD_DIR}/sim-arm64/libBBeBeeAudioBridge.a" \
@@ -51,11 +51,11 @@ libtool -static -o "${BUILD_DIR}/sim-arm64/libBBeBeeAudioBridge.a" \
 
 echo "=== Compiling iOS Simulator (x86_64) ==="
 xcrun --sdk iphonesimulator clang++ -arch x86_64 -isysroot "${IPHONESIM_SDK}" \
-  -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+  -mios-simulator-version-min=16.0 -std=c++17 -fobjc-arc \
   -I"${ROOT_DIR}/engine" \
   -c "${ROOT_DIR}/engine/pcm_ring_buffer.cpp" -o "${BUILD_DIR}/sim-x86_64/pcm_ring_buffer.o"
 xcrun --sdk iphonesimulator clang++ -arch x86_64 -isysroot "${IPHONESIM_SDK}" \
-  -mios-simulator-version-min=15.0 -std=c++17 -fobjc-arc \
+  -mios-simulator-version-min=16.0 -std=c++17 -fobjc-arc \
   -I"${ROOT_DIR}/engine" \
   -c "${ROOT_DIR}/engine/ios/BBeBeeAudioBridge.mm" -o "${BUILD_DIR}/sim-x86_64/BBeBeeAudioBridge.o"
 libtool -static -o "${BUILD_DIR}/sim-x86_64/libBBeBeeAudioBridge.a" \

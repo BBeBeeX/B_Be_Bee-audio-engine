@@ -147,8 +147,8 @@ meson setup "${BUILD_DIR}" \
 
 1. **Toolchain**: Apple clang via `xcrun --sdk iphoneos` and `xcrun --sdk iphonesimulator`.
 2. **Slices**:
-   - Device: `arm64` (`-miphoneos-version-min=15.0`)
-   - Simulator: `arm64` + `x86_64` (`-mios-simulator-version-min=15.0`)
+   - Device: `arm64` (`-miphoneos-version-min=16.0`)
+   - Simulator: `arm64` + `x86_64` (`-mios-simulator-version-min=16.0`)
 3. **Audio Backend**: CoreAudio / AudioUnit enabled; Video outputs disabled.
 4. **Packaging**: Assembled into dynamic `mpv.framework` with headers from `engine/mpv_client.h` and version from D1. Bundled into `audio-engine-ios.xcframework.zip`.
 

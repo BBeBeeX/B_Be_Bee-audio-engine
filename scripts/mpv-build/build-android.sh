@@ -183,7 +183,9 @@ bootstrap_autotools "${WORK_DIR}/ogg-src"
 
 # 3b. Build LAME (static, encoder-only) — the libmp3lame encoder backend.
 echo "=== [2/10] Building LAME (${LAME_VERSION}) for Android ${ABI} ==="
-mkdir -p "${WORK_DIR}/lame-src"
+# lame-src must NOT pre-exist: cp -R/mv below rename the extracted
+# lame-3.100 root into place; with the target dir pre-created they nest
+# lame-3.100/ inside it and ./configure is not at the top level.
 if [ -d "${ROOT_DIR}/third-party/src/lame-${LAME_VERSION}" ]; then
   cp -R "${ROOT_DIR}/third-party/src/lame-${LAME_VERSION}" "${WORK_DIR}/lame-src"
 else
