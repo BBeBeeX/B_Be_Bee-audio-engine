@@ -331,7 +331,7 @@ static NSString* iosNormalizedURI(NSString* uri) {
                        startTime:(double)startTime
                          endTime:(double)endTime
                         progress:(void (^)(double, double, double))progressBlock
-                      completion:(void (^)(BOOL, BOOL, NSString *))completionBlock {
+                      completion:(void (^ _Nullable)(BOOL, BOOL, NSString * _Nullable))completionBlock {
     if (!inputPath.length || !outputPath.length || !format.length) {
         if (completionBlock) {
             dispatch_async(dispatch_get_main_queue(), ^{

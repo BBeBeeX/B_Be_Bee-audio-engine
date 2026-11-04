@@ -112,7 +112,7 @@ typedef struct {
                                startTime:(double)startTime
                                  endTime:(double)endTime
                                 progress:(nullable void (^)(double progress, double currentTime, double duration))progressBlock
-                              completion:(nullable void (^)(BOOL ok, BOOL cancelled, nullable NSString *error))completionBlock;
+                              completion:(nullable void (^)(BOOL ok, BOOL cancelled, NSString * _Nullable error))completionBlock;
 - (void)cancelTranscode:(NSString *)jobId;
 
 @end
