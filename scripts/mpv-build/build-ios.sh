@@ -249,9 +249,23 @@ CROSSFILE
     cd "${vorbis_build}"
     ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
       --enable-static --disable-shared --with-pic \
-      --disable-docs --disable-examples --disable-oggtest --disable-vorbistest \
+      --disable-docs --disable-examples --disable-oggtest \
       CC="${clang_bin}" CFLAGS="${ios_cflags}" CPPFLAGS="${ios_cflags}" \
       LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}" LIBS="-lm"
+    # The tarball's 2020-vintage libtool passes -force_cpusubtype_ALL
+    # when linking, and Xcode 16.4's linker rejects that flag — this
+    # kills `make all` at the test_sharedbook link (the library objects
+    # themselves build fine). There is no configure switch for this:
+    # --disable-vorbistest does not exist (configure warns it is
+    # unrecognized) and test_sharedbook is built unconditionally by
+    # `make all`. So strip the dead flag from the libtool script that
+    # ./configure just generated — patching before configure would be
+    # overwritten, since configure writes this file. Static library
+    # links use ar, not ld, so removing the flag changes nothing about
+    # the libraries installed below.
+    if grep -q "force_cpusubtype_ALL" libtool 2>/dev/null; then
+      sed -i '' 's/-force_cpusubtype_ALL//g' libtool
+    fi
     make -j"${CORES}"
     make install
   )
