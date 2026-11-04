@@ -41,11 +41,10 @@ typedef struct {
  * desktop actions of the same names (deviceId "default" maps to
  * mpv's "auto"; a nil/empty af string clears the filter chain).
  *
- * Transcode is intentionally NOT part of this bridge: the iOS FFmpeg
- * build has no encoders at all, so a transcode action here would need
- * an iOS FFmpeg encoder SDK first, the way Android's build stages one.
- * That is a build project, not a bridge method, and is tracked
- * separately from this parity work.
+ * Transcode used to be absent here because the iOS FFmpeg build had
+ * no encoders; it now has an iOS FFmpeg encoder SDK (see
+ * scripts/mpv-build/build-ios.sh) and the transcode methods below,
+ * which share the Android/desktop transcoder and contract.
  */
 - (NSDictionary *)currentState;
 - (void)setOutputDevice:(nullable NSString *)deviceId;
@@ -81,6 +80,33 @@ typedef struct {
  * Retrieve ring buffer performance and overflow metrics.
  */
 - (BBeBeeRingBufferStats)ringBufferStats;
+
+/**
+ * iOS transcode, mirroring the Android JNI contract (not a new one):
+ * a live jobId or a live output path is refused, progress is throttled
+ * by the transcoder (2% steps or 0.5 s), cancellation is cooperative
+ * (the worker exits at the next cancel checkpoint and the temp file
+ * is deleted, so a cancelled job never leaves a partial output).
+ * Runs on a background queue; progress and completion blocks are
+ * called on the main queue. Returns the jobId, or nil if the request
+ * was refused (completion is still called with ok=NO in that case).
+ * Input/output paths must be plain filesystem paths inside the app
+ * container; security-scoped URLs must be held open by the caller for
+ * the whole job. Transcode does not use mpv — it runs the shared
+ * libav transcoder, so it works even when mpv is unavailable.
+ */
+- (NSDictionary *)transcodeCapabilities;
+- (nullable NSString *)transcodeWithInput:(NSString *)inputPath
+                                  output:(NSString *)outputPath
+                                  format:(NSString *)format
+                                 bitrate:(nullable NSString *)bitrate
+                              sampleRate:(int)sampleRate
+                                channels:(int)channels
+                               startTime:(double)startTime
+                                 endTime:(double)endTime
+                                progress:(nullable void (^)(double progress, double currentTime, double duration))progressBlock
+                              completion:(nullable void (^)(BOOL ok, BOOL cancelled, nullable NSString *error))completionBlock;
+- (void)cancelTranscode:(NSString *)jobId;
 
 @end
 

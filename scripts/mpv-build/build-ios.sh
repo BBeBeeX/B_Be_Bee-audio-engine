@@ -25,6 +25,23 @@ LIBASS_VERSION="0.17.2"
 FREETYPE_VERSION="VER-2-13-2"
 FRIBIDI_VERSION="v1.0.14"
 HARFBUZZ_VERSION="8.3.0"
+# iOS transcode: external encoder libraries, same versions and pins as
+# build-android.sh (the transcode matrix is shared across platforms, so
+# the encoder backends must be too). These are built BEFORE FFmpeg's
+# configure runs — FFmpeg only enables libmp3lame/libvorbis/libopus
+# when their headers are discoverable at configure time.
+LAME_VERSION="3.100"
+LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
+LIBOGG_VERSION="v1.3.5"
+LIBOGG_COMMIT="e1774cd77f471443541596e09078e78fdc342e4f"
+LIBVORBIS_VERSION="v1.3.7"
+LIBVORBIS_COMMIT="0657aee69dec8508a0011f47f3b69d7538e9d262"
+LIBOPUS_VERSION="v1.4"
+LIBOPUS_COMMIT="82ac57d9f1aaf575800cf17373348e45b7ce6c0d"
+# Same selective encoder/muxer set as Android: every entry of
+# resolveTranscodeTarget() must actually resolve, nothing more.
+TRANSCODE_ENCODERS="aac alac flac pcm_s16le pcm_s24le pcm_f32le wmav2 libmp3lame libvorbis libopus"
+TRANSCODE_MUXERS="adts asf flac ipod mp4 mp3 ogg opus wav"
 # B1: peeled commits, same provenance as build-android.sh (see there).
 MPV_COMMIT="41f6a645068483470267271e1d09966ca3b9f413"
 FFMPEG_COMMIT="e38092ef9395d7049f871ef4d5411eb410e283e0"
@@ -43,6 +60,41 @@ verify_git_head() {
   head="$(git -C "${src_dir}" rev-parse HEAD)"
   if [ "${head}" != "${expected}" ]; then
     echo "ERROR: ${src_dir} HEAD ${head} != pinned ${expected} for its tag (tag may have moved)" >&2
+    exit 1
+  fi
+}
+
+verify_sha256() {
+  local file="$1"
+  local expected="$2"
+  local actual=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "${file}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
+  else
+    echo "ERROR: neither sha256sum nor shasum is available to verify ${file}." >&2
+    exit 1
+  fi
+  if [ "${actual}" != "${expected}" ]; then
+    echo "ERROR: ${file} sha256 ${actual} != expected ${expected}" >&2
+    exit 1
+  fi
+}
+
+# xiph sources ship autogen.sh, not configure; run it once per source
+# tree (same helper as build-android.sh).
+bootstrap_autotools() {
+  local src_dir="$1"
+  if [ ! -f "${src_dir}/configure" ]; then
+    if [ ! -f "${src_dir}/autogen.sh" ]; then
+      echo "ERROR: ${src_dir} has neither ./configure nor autogen.sh." >&2
+      exit 1
+    fi
+    (cd "${src_dir}" && NOCONFIGURE=1 ./autogen.sh)
+  fi
+  if [ ! -f "${src_dir}/configure" ]; then
+    echo "ERROR: autogen.sh did not generate ${src_dir}/configure." >&2
     exit 1
   fi
 }
@@ -102,6 +154,13 @@ build_slice() {
   local cpu_family="${arch}"
   [ "${arch}" = "arm64" ] && cpu_family="aarch64"
 
+  # Autotools host triple for the xiph/LAME builds below. The SDK and
+  # -arch flags (not the triple) select device vs simulator; the triple
+  # only has to get CPU family and OS right.
+  local host_triple="aarch64-apple-darwin"
+  [ "${arch}" = "x86_64" ] && host_triple="x86_64-apple-darwin"
+  local ios_cflags="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -O3 -fPIC"
+
   local cross_file_static="${WORK_DIR}/crossfile_static_${slice_name}.txt"
   cat << CROSSFILE > "${cross_file_static}"
 [built-in options]
@@ -134,8 +193,90 @@ cpu = '${arch}'
 endian = 'little'
 CROSSFILE
 
+  # 0. Build external encoder libraries for this iOS slice, BEFORE
+  # FFmpeg's configure (see the top-of-file note). Unlike Android,
+  # three slices share one script run and one source tree, so each
+  # build runs in a per-slice copy — configuring in the shared source
+  # dir would pollute it for the next slice.
+  echo "--- [1/7] Compiling external encoder libraries for ${slice_name} ---"
+
+  if [ ! -d "${WORK_DIR}/ogg-src" ]; then
+    git clone --depth 1 --branch "${LIBOGG_VERSION}" https://github.com/xiph/ogg.git "${WORK_DIR}/ogg-src"
+    verify_git_head "${WORK_DIR}/ogg-src" "${LIBOGG_COMMIT}"
+    bootstrap_autotools "${WORK_DIR}/ogg-src"
+  fi
+  local ogg_build="${WORK_DIR}/ogg_${slice_name}"
+  rm -rf "${ogg_build}"; mkdir -p "${ogg_build}"
+  cp -r "${WORK_DIR}/ogg-src"/. "${ogg_build}/"
+  (
+    cd "${ogg_build}"
+    ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
+      --enable-static --disable-shared --with-pic \
+      CC="${clang_bin}" CFLAGS="${ios_cflags}" CPPFLAGS="${ios_cflags}" \
+      LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}"
+    make -j"${CORES}"
+    make install
+  )
+
+  if [ ! -f "${WORK_DIR}/lame-${LAME_VERSION}.tar.gz" ]; then
+    curl -fL -o "${WORK_DIR}/lame-${LAME_VERSION}.tar.gz" \
+      "https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz"
+    verify_sha256 "${WORK_DIR}/lame-${LAME_VERSION}.tar.gz" "${LAME_SHA256}"
+  fi
+  local lame_build="${WORK_DIR}/lame_${slice_name}"
+  rm -rf "${lame_build}"; mkdir -p "${lame_build}"
+  tar -xz -C "${lame_build}" --strip-components=1 -f "${WORK_DIR}/lame-${LAME_VERSION}.tar.gz"
+  (
+    cd "${lame_build}"
+    ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
+      --enable-static --disable-shared --with-pic \
+      --disable-frontend --disable-decoder --disable-gtktest \
+      CC="${clang_bin}" CFLAGS="${ios_cflags}" CPPFLAGS="${ios_cflags}" \
+      LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}"
+    make -j"${CORES}"
+    make install
+  )
+
+  if [ ! -d "${WORK_DIR}/vorbis-src" ]; then
+    git clone --depth 1 --branch "${LIBVORBIS_VERSION}" https://github.com/xiph/vorbis.git "${WORK_DIR}/vorbis-src"
+    verify_git_head "${WORK_DIR}/vorbis-src" "${LIBVORBIS_COMMIT}"
+    bootstrap_autotools "${WORK_DIR}/vorbis-src"
+  fi
+  local vorbis_build="${WORK_DIR}/vorbis_${slice_name}"
+  rm -rf "${vorbis_build}"; mkdir -p "${vorbis_build}"
+  cp -r "${WORK_DIR}/vorbis-src"/. "${vorbis_build}/"
+  (
+    cd "${vorbis_build}"
+    ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
+      --enable-static --disable-shared --with-pic \
+      --disable-docs --disable-examples --disable-oggtest --disable-vorbistest \
+      CC="${clang_bin}" CFLAGS="${ios_cflags}" CPPFLAGS="${ios_cflags}" \
+      LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}" LIBS="-lm"
+    make -j"${CORES}"
+    make install
+  )
+
+  if [ ! -d "${WORK_DIR}/opus-src" ]; then
+    git clone --depth 1 --branch "${LIBOPUS_VERSION}" https://github.com/xiph/opus.git "${WORK_DIR}/opus-src"
+    verify_git_head "${WORK_DIR}/opus-src" "${LIBOPUS_COMMIT}"
+    bootstrap_autotools "${WORK_DIR}/opus-src"
+  fi
+  local opus_build="${WORK_DIR}/opus_${slice_name}"
+  rm -rf "${opus_build}"; mkdir -p "${opus_build}"
+  cp -r "${WORK_DIR}/opus-src"/. "${opus_build}/"
+  (
+    cd "${opus_build}"
+    ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
+      --enable-static --disable-shared --with-pic \
+      --disable-doc --disable-extra-programs \
+      CC="${clang_bin}" CFLAGS="${ios_cflags}" CPPFLAGS="${ios_cflags}" \
+      LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}"
+    make -j"${CORES}"
+    make install
+  )
+
   # 1. Build FFmpeg for this iOS slice
-  echo "--- [1/6] Compiling FFmpeg for ${slice_name} ---"
+  echo "--- [2/7] Compiling FFmpeg for ${slice_name} ---"
   local ffmpeg_build="${WORK_DIR}/ffmpeg_${slice_name}"
   mkdir -p "${ffmpeg_build}"
   if [ ! -d "${WORK_DIR}/ffmpeg-src" ]; then
@@ -146,6 +287,20 @@ CROSSFILE
 
   local extra_ff_args=""
   [ "${arch}" = "x86_64" ] && extra_ff_args="--disable-x86asm"
+
+  # iOS transcode: same selective set as Android. The --disable-*
+  # base keeps the archive small; the enables below are what make
+  # every resolveTranscodeTarget() entry resolvable. libmp3lame/
+  # libvorbis/libopus come from step 0 above, so they must be
+  # discoverable here via -I/-L on the slice prefix. (No --disable-asm
+  # for arm64 here, unlike Android: iOS links statically into an app
+  # executable, where the movrel relocation that lld rejects for a
+  # shared .so is not a problem.)
+  local encoder_flags=""
+  local muxer_flags=""
+  local enc mux
+  for enc in ${TRANSCODE_ENCODERS}; do encoder_flags="${encoder_flags} --enable-encoder=${enc}"; done
+  for mux in ${TRANSCODE_MUXERS}; do muxer_flags="${muxer_flags} --enable-muxer=${mux}"; done
 
   (
     cd "${ffmpeg_build}"
@@ -160,14 +315,19 @@ CROSSFILE
       --nm="${nm_bin}" \
       --ranlib="${ranlib_bin}" \
       --strip="${strip_bin}" \
-      --extra-cflags="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -fPIC -O3" \
-      --extra-ldflags="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}" \
+      --extra-cflags="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -fPIC -O3 -I${slice_prefix}/include" \
+      --extra-ldflags="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag} -L${slice_prefix}/lib" \
       --disable-programs \
       --disable-doc \
       --disable-avdevice \
       --disable-postproc \
       --disable-encoders \
       --disable-muxers \
+      ${encoder_flags} \
+      ${muxer_flags} \
+      --enable-libmp3lame \
+      --enable-libvorbis \
+      --enable-libopus \
       --enable-static \
       --disable-shared \
       --enable-pic \
@@ -181,7 +341,7 @@ CROSSFILE
   )
 
   # 2. Build FreeType for this iOS slice
-  echo "--- [2/6] Compiling FreeType for ${slice_name} ---"
+  echo "--- [3/7] Compiling FreeType for ${slice_name} ---"
   local freetype_build="${WORK_DIR}/freetype_${slice_name}"
   mkdir -p "${freetype_build}"
   if [ ! -d "${WORK_DIR}/freetype-src" ]; then
@@ -207,7 +367,7 @@ CROSSFILE
   )
 
   # 3. Build FriBidi for this iOS slice
-  echo "--- [3/6] Compiling FriBidi for ${slice_name} ---"
+  echo "--- [4/7] Compiling FriBidi for ${slice_name} ---"
   local fribidi_build="${WORK_DIR}/fribidi_${slice_name}"
   mkdir -p "${fribidi_build}"
   if [ ! -d "${WORK_DIR}/fribidi-src" ]; then
@@ -230,7 +390,7 @@ CROSSFILE
   )
 
   # 4. Build HarfBuzz for this iOS slice
-  echo "--- [4/6] Compiling HarfBuzz for ${slice_name} ---"
+  echo "--- [5/7] Compiling HarfBuzz for ${slice_name} ---"
   local harfbuzz_build="${WORK_DIR}/harfbuzz_${slice_name}"
   mkdir -p "${harfbuzz_build}"
   if [ ! -d "${WORK_DIR}/harfbuzz-src" ]; then
@@ -263,7 +423,7 @@ CROSSFILE
   )
 
   # 5. Build libass for this iOS slice
-  echo "--- [5/6] Compiling libass for ${slice_name} ---"
+  echo "--- [6/7] Compiling libass for ${slice_name} ---"
   local libass_build="${WORK_DIR}/libass_${slice_name}"
   mkdir -p "${libass_build}"
   if [ ! -d "${WORK_DIR}/libass-src" ]; then
@@ -291,7 +451,7 @@ CROSSFILE
   )
 
   # 6. Build libplacebo for this iOS slice
-  echo "--- [6/6] Compiling libplacebo for ${slice_name} ---"
+  echo "--- [7/7] Compiling libplacebo for ${slice_name} ---"
   local libplacebo_build="${WORK_DIR}/libplacebo_${slice_name}"
   mkdir -p "${libplacebo_build}"
   if [ ! -d "${WORK_DIR}/libplacebo-src" ]; then
@@ -467,6 +627,45 @@ CROSSFILE
     chmod 0755 "${WORK_DIR}/binaries/mpv_${slice_name}"
     install_name_tool -id "@rpath/mpv.framework/mpv" "${WORK_DIR}/binaries/mpv_${slice_name}" 2>/dev/null || true
   )
+
+  # Stage the FFmpeg SDK for the bridge transcode build. The whole
+  # prefix lives under WORK_DIR, which `trap cleanup EXIT` deletes,
+  # so — mirroring Android's step 11 — the headers and static archives
+  # the bridge links must outlive this script. Consumers (see
+  # scripts/build-ios-framework.sh) find them at
+  #   staging/mobile-mpv/ios/ffmpeg-sdk-<slice_name>/
+  # next to the mpv.framework target.
+  echo "=== Staging FFmpeg SDK for bridge transcode linking (${slice_name}) ==="
+  local sdk_out_dir="${ROOT_DIR}/staging/mobile-mpv/ios/ffmpeg-sdk-${slice_name}"
+  rm -rf "${sdk_out_dir}"
+  mkdir -p "${sdk_out_dir}/include" "${sdk_out_dir}/lib"
+  local hdr lib sdk_libs=""
+  for hdr in libavcodec libavformat libavutil libswresample lame opus vorbis ogg; do
+    if [ -d "${slice_prefix}/include/${hdr}" ]; then
+      cp -R "${slice_prefix}/include/${hdr}" "${sdk_out_dir}/include/"
+    fi
+  done
+  for lib in libavcodec libavformat libavutil libswresample libswscale \
+             libmp3lame libopus libvorbis libvorbisenc libvorbisfile libogg; do
+    if [ -f "${slice_prefix}/lib/${lib}.a" ]; then
+      cp -L "${slice_prefix}/lib/${lib}.a" "${sdk_out_dir}/lib/"
+      sdk_libs="${sdk_libs} ${lib}.a"
+    fi
+  done
+  if [ ! -f "${sdk_out_dir}/lib/libavcodec.a" ]; then
+    echo "ERROR: FFmpeg SDK staging failed — ${sdk_out_dir}/lib/libavcodec.a missing!" >&2
+    exit 1
+  fi
+  cat > "${sdk_out_dir}/BUILD_INFO.txt" <<EOF
+FFmpeg: ${FFMPEG_VERSION}
+LAME: ${LAME_VERSION}
+libogg: ${LIBOGG_VERSION}
+libvorbis: ${LIBVORBIS_VERSION}
+libopus: ${LIBOPUS_VERSION}
+Slice: ${slice_name}
+Staged archives:${sdk_libs}
+EOF
+  echo "FFmpeg SDK staged at ${sdk_out_dir}:${sdk_libs}"
 }
 
 # Build the 3 standard iOS slices

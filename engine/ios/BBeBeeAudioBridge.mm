@@ -11,6 +11,10 @@
 #include "../mpv_client.h"
 #include "../pcm_ring_buffer.hpp"
 #include "../fft.hpp"
+#include "../transcode.hpp"
+#include "../jni/transcode_caps.hpp"
+#include <map>
+#include <string>
 
 // Dynamic function pointers for libmpv symbols on iOS / macOS
 typedef mpv_handle* (*mpv_create_fn)();
@@ -74,6 +78,14 @@ static bool loadIosMpvSymbols() {
     std::atomic<bool> _pcmTapRegistered;
     std::atomic<bool> _isPlaying;
     NSString* _currentURI;
+    // Transcode job registry, mirroring the JNI/desktop contract. A
+    // separate mutex from _mutex: progress/completion callbacks must
+    // never be invoked while holding the lock that cancelTranscode
+    // takes, or a callback that cancels its own job would deadlock.
+    std::mutex _transcodeMutex;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> _transcodeJobs;
+    std::map<std::string, std::string> _transcodeOutputs;
+    dispatch_queue_t _transcodeQueue;
 }
 - (void)onPcmFrames:(const float *)samples frames:(int)frames channels:(int)channels sampleRate:(int)sampleRate;
 @end
@@ -94,6 +106,7 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
     _mpv = nullptr;
     _pcmTapRegistered.store(false);
     _isPlaying.store(false);
+    _transcodeQueue = dispatch_queue_create("org.bbebee.audio.transcode", DISPATCH_QUEUE_CONCURRENT);
     _ringBuffer = std::make_unique<audio_engine::PcmRingBuffer>();
     _fftProcessor = std::make_unique<audio_engine::FftProcessor>();
     _ringBuffer->configure(44100, 2, 8192);
@@ -148,6 +161,15 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
 }
 
 - (void)destroy {
+    // Cancel any running transcode jobs first, mirroring the desktop
+    // shutdown path: workers observe the flag at the next checkpoint,
+    // delete their temp file, and report cancelled. The worker blocks
+    // hold self via ivar access until they finish, so destroy cannot
+    // free the registry out from under a running job.
+    {
+        std::lock_guard<std::mutex> tLock(_transcodeMutex);
+        for (auto& kv : _transcodeJobs) kv.second->store(true);
+    }
     std::lock_guard<std::mutex> lock(_mutex);
     if (_mpv) {
         if (s_mpv_set_pcm_callback && _pcmTapRegistered.load()) {
@@ -249,6 +271,109 @@ static NSString* iosNormalizedURI(NSString* uri) {
     if (_mpv && s_mpv_set_property_string) {
         s_mpv_set_property_string(_mpv, "af", afString ? [afString UTF8String] : "");
     }
+}
+
+- (NSDictionary *)transcodeCapabilities {
+    bbebee::jni::TranscodeCaps caps = bbebee::jni::probeTranscodeCaps();
+    NSMutableDictionary* encoders = [NSMutableDictionary dictionary];
+    for (const auto& kv : caps.encoders) {
+        encoders[[NSString stringWithUTF8String:kv.first.c_str()]] = @(kv.second);
+    }
+    return @{
+        @"supported": @(caps.supported),
+        @"encoders": encoders,
+    };
+}
+
+- (NSString *)transcodeWithInput:(NSString *)inputPath
+                          output:(NSString *)outputPath
+                          format:(NSString *)format
+                         bitrate:(NSString *)bitrate
+                      sampleRate:(int)sampleRate
+                        channels:(int)channels
+                       startTime:(double)startTime
+                         endTime:(double)endTime
+                        progress:(void (^)(double, double, double))progressBlock
+                      completion:(void (^)(BOOL, BOOL, NSString *))completionBlock {
+    if (!inputPath.length || !outputPath.length || !format.length) {
+        if (completionBlock) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completionBlock(NO, NO, @"input, output and format are required");
+            });
+        }
+        return nil;
+    }
+
+    audio_engine::TranscodeOptions opts;
+    opts.jobId = "tc-" + std::string([[[NSUUID UUID] UUIDString] UTF8String]);
+    opts.inputPath = [inputPath UTF8String];
+    opts.outputPath = [outputPath UTF8String];
+    opts.format = [format UTF8String];
+    opts.bitrate = bitrate ? [bitrate UTF8String] : "";
+    opts.sampleRate = sampleRate;
+    opts.channels = channels;
+    opts.startTimeSec = startTime;
+    opts.endTimeSec = endTime;
+
+    auto cancelFlag = std::make_shared<std::atomic<bool>>(false);
+    const std::string outputKey = audio_engine::normalizePathForComparison(opts.outputPath);
+    {
+        std::lock_guard<std::mutex> lock(_transcodeMutex);
+        auto outIt = _transcodeOutputs.find(outputKey);
+        if (outIt != _transcodeOutputs.end()) {
+            if (completionBlock) {
+                NSString* msg = [NSString stringWithFormat:@"output '%@' is already being written by job '%s'",
+                                 outputPath, outIt->second.c_str()];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completionBlock(NO, NO, msg);
+                });
+            }
+            return nil;
+        }
+        _transcodeJobs[opts.jobId] = cancelFlag;
+        _transcodeOutputs[outputKey] = opts.jobId;
+    }
+
+    NSString* jobIdObj = [NSString stringWithUTF8String:opts.jobId.c_str()];
+    void (^progressCopy)(double, double, double) = [progressBlock copy];
+    void (^completionCopy)(BOOL, BOOL, NSString *) = [completionBlock copy];
+    dispatch_async(_transcodeQueue, ^{
+        audio_engine::Transcoder transcoder;
+        audio_engine::TranscodeResult r = transcoder.transcode(
+            opts,
+            [progressCopy](double p, double currentSec, double durationSec) {
+                if (!progressCopy) return;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    progressCopy(p, currentSec, durationSec);
+                });
+            },
+            cancelFlag.get());
+
+        {
+            std::lock_guard<std::mutex> lock(_transcodeMutex);
+            auto it = _transcodeJobs.find(opts.jobId);
+            if (it != _transcodeJobs.end() && it->second == cancelFlag)
+                _transcodeJobs.erase(it);
+            auto outIt = _transcodeOutputs.find(outputKey);
+            if (outIt != _transcodeOutputs.end() && outIt->second == opts.jobId)
+                _transcodeOutputs.erase(outIt);
+        }
+
+        if (completionCopy) {
+            NSString* err = r.ok ? nil : [NSString stringWithUTF8String:r.error.c_str()];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completionCopy(r.ok, r.cancelled, err);
+            });
+        }
+    });
+    return jobIdObj;
+}
+
+- (void)cancelTranscode:(NSString *)jobId {
+    if (!jobId.length) return;
+    std::lock_guard<std::mutex> lock(_transcodeMutex);
+    auto it = _transcodeJobs.find([jobId UTF8String]);
+    if (it != _transcodeJobs.end()) it->second->store(true);
 }
 
 - (void)play {
