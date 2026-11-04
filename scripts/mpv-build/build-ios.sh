@@ -345,7 +345,24 @@ CROSSFILE
       --enable-version3 \
       --enable-audiotoolbox \
       --enable-videotoolbox \
-      ${extra_ff_args}
+      --pkg-config-flags="--static" \
+      ${extra_ff_args} || {
+      # All three pkg-config deps here (vorbis, vorbisenc, opus)
+      # are static-only .a files, so the link test — and later the
+      # final static FFmpeg link — needs Libs.private (e.g. -lm),
+      # which plain `pkg-config --libs` omits. Without --static the
+      # vorbis check can die with "not found using pkg-config"
+      # even though the .pc files are present and --exists passes.
+      # And since configure dies at the first failing check, that
+      # check (its pkg-config invocation, the link-test command and
+      # its output) is at the tail of ffbuild/config.log — print it
+      # before the WORK_DIR trap deletes it, or the next such
+      # failure is undiagnosable: the message is identical for an
+      # --exists failure and a link-test failure.
+      echo "=== FFmpeg configure failed; tail of ffbuild/config.log ===" >&2
+      tail -n 150 ffbuild/config.log >&2 || true
+      exit 1
+    }
     make -j"${CORES}"
     make install
   )
