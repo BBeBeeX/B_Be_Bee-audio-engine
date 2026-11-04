@@ -247,25 +247,26 @@ CROSSFILE
     "${LIBVORBIS_SHA256}" "libvorbis-${LIBVORBIS_VERSION}.tar.gz" "${vorbis_build}"
   (
     cd "${vorbis_build}"
+    # Root cause — NOT libtool (the 4ce7a86 patch targeted the wrong
+    # file: its grep guard never fired, so the build failed byte-
+    # identically). vorbis's configure.ac adds -force_cpusubtype_ALL
+    # to CFLAGS/DEBUG/PROFILE unconditionally for Darwin — a 2001
+    # PowerPC leftover; upstream xiph/vorbis#108 removes it, and
+    # EasyRPG patches configure the same way. The flag then rides
+    # CFLAGS into every link, clang forwards it to the new ld, and
+    # the link of test_sharedbook (built unconditionally by `make
+    # all`; no configure switch disables it) dies on it. So strip
+    # the flag from the configure script BEFORE running it: patching
+    # the generated libtool would miss it, and patching configure.ac
+    # would need autogen, which this tarball route exists to avoid.
+    # One sed covers all three variables at once; with no match it
+    # is a no-op, so no guard is needed.
+    sed -i '' 's/-force_cpusubtype_ALL//g' configure
     ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
       --enable-static --disable-shared --with-pic \
       --disable-docs --disable-examples --disable-oggtest \
       CC="${clang_bin}" CFLAGS="${ios_cflags}" CPPFLAGS="${ios_cflags}" \
       LDFLAGS="-arch ${arch} -isysroot ${sdk_path} ${min_ver_flag}" LIBS="-lm"
-    # The tarball's 2020-vintage libtool passes -force_cpusubtype_ALL
-    # when linking, and Xcode 16.4's linker rejects that flag — this
-    # kills `make all` at the test_sharedbook link (the library objects
-    # themselves build fine). There is no configure switch for this:
-    # --disable-vorbistest does not exist (configure warns it is
-    # unrecognized) and test_sharedbook is built unconditionally by
-    # `make all`. So strip the dead flag from the libtool script that
-    # ./configure just generated — patching before configure would be
-    # overwritten, since configure writes this file. Static library
-    # links use ar, not ld, so removing the flag changes nothing about
-    # the libraries installed below.
-    if grep -q "force_cpusubtype_ALL" libtool 2>/dev/null; then
-      sed -i '' 's/-force_cpusubtype_ALL//g' libtool
-    fi
     make -j"${CORES}"
     make install
   )
