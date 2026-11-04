@@ -58,6 +58,13 @@ TranscodeTarget resolveTranscodeTarget(const std::string& format);
 // empty or unparseable input (caller treats 0 as "encoder default").
 int parseBitrate(const std::string& s);
 
+// Normalize a path for comparison: strip a file:// prefix, cut ?/#
+// suffixes, and resolve ./.. lexically. Shared by the same-path guard
+// and by callers that need an output-path registry key (desktop NDJSON,
+// JNI); keeping one implementation means the two can never disagree
+// about whether two spellings name one file.
+std::string normalizePathForComparison(const std::string& p);
+
 // Progress callback: progress01 in [0,1], currentSec/durationSec in seconds.
 using TranscodeProgressCb = std::function<void(double progress01, double currentSec, double durationSec)>;
 

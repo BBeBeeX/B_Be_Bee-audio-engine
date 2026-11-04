@@ -461,8 +461,14 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
     bool probeSatisfied = false;
     for (int i = 0; i < 40; i++) {
         if (mpvHandle_ != handleAtLoad) return result;
-        if (result.sampleRate <= 0) result.sampleRate = static_cast<int>(getDoubleProp("audio-params/samplerate", 0.0));
-        if (result.channels <= 0) result.channels = static_cast<int>(getDoubleProp("audio-params/channel-count", 0.0));
+        // E3: audio-out-params, not audio-params. audio-params is the
+        // decoder output; audio-out-params is what the AO actually
+        // plays after resampling/mixing, which is what the JS side
+        // (and the desktop engine, which fixed this same mismatch)
+        // must be told. Reporting decoder parameters here could
+        // disagree with the PCM tap's actual format.
+        if (result.sampleRate <= 0) result.sampleRate = static_cast<int>(getDoubleProp("audio-out-params/samplerate", 0.0));
+        if (result.channels <= 0) result.channels = static_cast<int>(getDoubleProp("audio-out-params/channel-count", 0.0));
         if (result.durationMs <= 0.0) {
             const double duration = getDoubleProp("duration", 0.0);
             if (duration > 0.0) result.durationMs = duration * 1000.0;
@@ -492,9 +498,9 @@ LoadResult AudioEngineContext::loadEx(const std::string& uri, const std::string&
     }
     result.ok = true;
     result.endedCount = endedCount_;
-    if (result.sampleRate <= 0) result.sampleRate = static_cast<int>(getDoubleProp("audio-params/samplerate", 0.0));
-    if (result.channels <= 0) result.channels = static_cast<int>(getDoubleProp("audio-params/channel-count", 0.0));
-    result.bitDepth = audioFormatBitDepth(getStringProp("audio-params/format"));
+    if (result.sampleRate <= 0) result.sampleRate = static_cast<int>(getDoubleProp("audio-out-params/samplerate", 0.0));
+    if (result.channels <= 0) result.channels = static_cast<int>(getDoubleProp("audio-out-params/channel-count", 0.0));
+    result.bitDepth = audioFormatBitDepth(getStringProp("audio-out-params/format"));
     return result;
 }
 
@@ -1136,12 +1142,10 @@ JNIEXPORT jstring JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeTranscod
     // transcoder opens the input, then opens the output for writing).
     // Reject before any worker starts, on the normalized spellings, so
     // `file:///a/b` vs `/a/b` vs `file://localhost/a/b` all match.
-    // This check lives only here, not also in Transcoder::transcode:
-    // the desktop NDJSON path in engine/main.cpp calls the transcoder
-    // directly and keeps its own contract, so a second check there
-    // would be a duplicate guard with a different error surface.
-    // (That path therefore still needs its own same-path guard if the
-    // desktop caller can ever pass equal paths — see the report.)
+    // E4 (comment correction): this is defense in depth, not the only
+    // guard — Transcoder::transcode has its own same-path check since
+    // 49224ff, plus a file-identity check, so both the JNI and the
+    // desktop NDJSON paths are covered even if a caller skips this one.
     if (pathsReferToSameFile(opts.inputPath, opts.outputPath)) {
         answer.objVal["ok"] = JsonValue(false);
         answer.objVal["error"] = JsonValue("input and output paths must differ");

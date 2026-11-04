@@ -29,7 +29,9 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
+#include <system_error>
 
 namespace audio_engine {
 
@@ -109,6 +111,43 @@ int parseBitrate(const std::string& s) {
     double bps = value * mult;
     if (bps <= 0.0 || bps > 100000000.0) return 0;
     return (int)bps;
+}
+
+std::string normalizePathForComparison(const std::string& input) {
+    std::string p = input;
+    const std::string prefix = "file://";
+    if (p.rfind(prefix, 0) == 0) {
+        std::string rest = p.substr(prefix.size());
+        if (!rest.empty() && rest[0] == '/') p = rest;
+        else if (rest.rfind("localhost/", 0) == 0) p = "/" + rest.substr(10);
+        else p = rest;
+    }
+    const size_t cut = p.find_first_of("?#");
+    if (cut != std::string::npos) p = p.substr(0, cut);
+    const bool absolute = !p.empty() && p[0] == '/';
+    std::vector<std::string> parts;
+    std::string cur;
+    for (size_t i = 0; i <= p.size(); ++i) {
+        if (i == p.size() || p[i] == '/') {
+            if (cur.empty() || cur == ".") {
+                // skip
+            } else if (cur == "..") {
+                if (!parts.empty() && parts.back() != "..") parts.pop_back();
+                else if (!absolute) parts.push_back(cur);
+            } else {
+                parts.push_back(cur);
+            }
+            cur.clear();
+        } else {
+            cur += p[i];
+        }
+    }
+    std::string out = absolute ? "/" : "";
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) out += "/";
+        out += parts[i];
+    }
+    return out;
 }
 
 #ifdef HAVE_LIBAV
@@ -204,50 +243,38 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     if (opts.inputPath.empty()) return fail("empty input path");
     if (opts.outputPath.empty()) return fail("empty output path");
 
+    // D2: parameter validation up front, so a bad trim window or a
+    // negative rate/channel count fails here with a clear error instead
+    // of surfacing as an encoder error or a negative progress value.
+    if (opts.startTimeSec < 0.0) return fail("start time must not be negative");
+    if (opts.endTimeSec > 0.0 && opts.endTimeSec <= opts.startTimeSec)
+        return fail("end time must be greater than start time");
+    if (opts.sampleRate < 0) return fail("sample rate must not be negative");
+    if (opts.channels < 0) return fail("channel count must not be negative");
+
     // Same-path guard, here in the shared Transcoder entry so it covers
     // both the JNI path and the desktop NDJSON path (the JNI layer has
-    // its own identical check as defense in depth). Lexical only, so
-    // symlink/hardlink aliases still slip through — but distinct files
-    // are never falsely rejected, and without this check a same-path
-    // job would rename its transcoded temp file over the source.
+    // its own check as defense in depth).
+    if (normalizePathForComparison(opts.inputPath) ==
+        normalizePathForComparison(opts.outputPath))
+        return fail("input and output paths must differ");
+    // D1: the lexical guard above cannot see through symlinks or
+    // hardlinks, so also compare file identity when both paths exist,
+    // and refuse a symlink destination outright — renaming the temp
+    // file over a symlink would replace the link itself, silently
+    // orphaning whatever it pointed at.
     {
-        auto normalize = [](std::string p) {
-            const std::string prefix = "file://";
-            if (p.rfind(prefix, 0) == 0) {
-                std::string rest = p.substr(prefix.size());
-                if (!rest.empty() && rest[0] == '/') p = rest;
-                else if (rest.rfind("localhost/", 0) == 0) p = "/" + rest.substr(10);
-                else p = rest;
-            }
-            const size_t cut = p.find_first_of("?#");
-            if (cut != std::string::npos) p = p.substr(0, cut);
-            const bool absolute = !p.empty() && p[0] == '/';
-            std::vector<std::string> parts;
-            std::string cur;
-            for (size_t i = 0; i <= p.size(); ++i) {
-                if (i == p.size() || p[i] == '/') {
-                    if (cur.empty() || cur == ".") {
-                        // skip
-                    } else if (cur == "..") {
-                        if (!parts.empty() && parts.back() != "..") parts.pop_back();
-                        else if (!absolute) parts.push_back(cur);
-                    } else {
-                        parts.push_back(cur);
-                    }
-                    cur.clear();
-                } else {
-                    cur += p[i];
-                }
-            }
-            std::string out = absolute ? "/" : "";
-            for (size_t i = 0; i < parts.size(); ++i) {
-                if (i) out += "/";
-                out += parts[i];
-            }
-            return out;
-        };
-        if (normalize(opts.inputPath) == normalize(opts.outputPath))
-            return fail("input and output paths must differ");
+        std::error_code ec;
+        const std::string inNorm = normalizePathForComparison(opts.inputPath);
+        const std::string outNorm = normalizePathForComparison(opts.outputPath);
+        if (std::filesystem::is_symlink(outNorm, ec))
+            return fail("output path must not be a symlink: " + opts.outputPath);
+        ec.clear();
+        if (std::filesystem::exists(inNorm, ec) && std::filesystem::exists(outNorm, ec)) {
+            std::error_code eqEc;
+            if (std::filesystem::equivalent(inNorm, outNorm, eqEc) && !eqEc)
+                return fail("input and output paths refer to the same file");
+        }
     }
 
     // M2: never write the destination directly. The pipeline below
@@ -260,8 +287,8 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     // the temp file; a pre-existing destination is untouched on failure.
     // The temp name is derived from the (caller-controlled) jobId, so
     // it is sanitized to one path component; distinct jobs also get
-    // distinct temp files, and the JNI layer already refuses two live
-    // jobs on one destination.
+    // distinct temp files, and both the JNI layer and the desktop NDJSON
+    // layer refuse two live jobs on one destination (see main.cpp).
     std::string safeJobId;
     for (char c : opts.jobId) {
         const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -509,8 +536,13 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     }
 
     // --- Flush decoder ---
+    // C1: the flush phases used to ignore cancellation entirely, so a
+    // cancel arriving after EOF still produced a completed output. Every
+    // flush loop below checks the flag before doing more work.
+    if (isCancelled()) return cancelled();
     avcodec_send_packet(decCtx.get(), nullptr);
     while (avcodec_receive_frame(decCtx.get(), frame.get()) == 0) {
+        if (isCancelled()) return cancelled();
         pushFrame(okFlag);
         if (!okFlag) return fail("resample/convert failed (flush)");
         drainFifo(okFlag);
@@ -520,6 +552,7 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
 
     // --- Flush resampler ---
     for (;;) {
+        if (isCancelled()) return cancelled();
         uint8_t** conv = nullptr;
         int convLinesize = 0;
         const int dstNb = 1024;
@@ -541,6 +574,7 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     }
 
     // --- Drain remaining fifo (partial frame, zero-padded) ---
+    if (isCancelled()) return cancelled();
     {
         const int remaining = av_audio_fifo_size(fifo.get());
         if (remaining > 0) {
@@ -570,8 +604,10 @@ TranscodeResult Transcoder::transcode(const TranscodeOptions& opts,
     }
 
     // --- Flush encoder ---
+    if (isCancelled()) return cancelled();
     avcodec_send_frame(encCtx.get(), nullptr);
     while (avcodec_receive_packet(encCtx.get(), encPkt.get()) == 0) {
+        if (isCancelled()) return cancelled();
         av_packet_rescale_ts(encPkt.get(), encCtx->time_base, outStream->time_base);
         encPkt->stream_index = outStream->index;
         if (av_interleaved_write_frame(ofmt.get(), encPkt.get()) < 0) return fail("mux failed (encoder flush)");

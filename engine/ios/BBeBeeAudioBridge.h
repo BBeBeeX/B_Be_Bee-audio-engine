@@ -34,6 +34,25 @@ typedef struct {
 - (void)destroy;
 
 /**
+ * E2: parity additions that used to exist only on Android/desktop.
+ * currentState answers status/positionMs/durationMs/uri/mpvAvailable/
+ * pcmTapAvailable from the engine instead of forcing the caller to
+ * infer state. setOutputDevice/setMuted/setDspConfig mirror the
+ * desktop actions of the same names (deviceId "default" maps to
+ * mpv's "auto"; a nil/empty af string clears the filter chain).
+ *
+ * Transcode is intentionally NOT part of this bridge: the iOS FFmpeg
+ * build has no encoders at all, so a transcode action here would need
+ * an iOS FFmpeg encoder SDK first, the way Android's build stages one.
+ * That is a build project, not a bridge method, and is tracked
+ * separately from this parity work.
+ */
+- (NSDictionary *)currentState;
+- (void)setOutputDevice:(nullable NSString *)deviceId;
+- (void)setMuted:(BOOL)muted;
+- (void)setDspConfig:(nullable NSString *)afString;
+
+/**
  * Load audio track or remote stream URI.
  */
 - (BOOL)loadURI:(NSString *)uri error:(NSError * _Nullable * _Nullable)error;

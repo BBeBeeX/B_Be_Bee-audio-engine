@@ -66,6 +66,7 @@ static std::string getExecutableDir() {
 #endif
 
 #include "mpv_client.h"
+#include "jni/transcode_caps.hpp"
 #include "pcm_ring_buffer.hpp"
 #include "fft.hpp"
 #include "json.hpp"
@@ -152,7 +153,7 @@ struct MpvDynLib {
                 free_data = reinterpret_cast<fn_mpv_free>(GetProcAddress(h, "mpv_free"));
                 request_log_messages = reinterpret_cast<fn_mpv_request_log_messages>(GetProcAddress(h, "mpv_request_log_messages"));
                 set_pcm_callback = reinterpret_cast<fn_mpv_set_pcm_callback>(GetProcAddress(h, "mpv_set_pcm_callback"));
-                if (create && initialize) return true;
+                if (create && initialize && destroy && set_option_string && command && wait_event && get_property) return true; // C5: init() calls set_option_string unguarded and the event loop calls wait_event, so a libmpv missing either must fail load() and fall back instead of crashing
                 FreeLibrary(h);
                 handle = nullptr;
             }
@@ -177,7 +178,7 @@ struct MpvDynLib {
                 free_data = reinterpret_cast<fn_mpv_free>(dlsym(h, "mpv_free"));
                 request_log_messages = reinterpret_cast<fn_mpv_request_log_messages>(dlsym(h, "mpv_request_log_messages"));
                 set_pcm_callback = reinterpret_cast<fn_mpv_set_pcm_callback>(dlsym(h, "mpv_set_pcm_callback"));
-                if (create && initialize) return true;
+                if (create && initialize && destroy && set_option_string && command && wait_event && get_property) return true; // C5: init() calls set_option_string unguarded and the event loop calls wait_event, so a libmpv missing either must fail load() and fall back instead of crashing
                 dlclose(h);
                 handle = nullptr;
             }
@@ -490,8 +491,16 @@ public:
             }
             const char* pauseCmd[] = { "set", "pause", "yes", nullptr };
             mpvLib.command(mpv, pauseCmd);
-        } else if (std::getenv("VITEST") != nullptr || (std::getenv("NODE_ENV") != nullptr && std::string(std::getenv("NODE_ENV")) == "test")) {
-            // Fallback for headless test environments without libmpv installed
+        }
+#ifdef AUDIO_ENGINE_TEST_FALLBACK
+        else if (std::getenv("VITEST") != nullptr || (std::getenv("NODE_ENV") != nullptr && std::string(std::getenv("NODE_ENV")) == "test")) {
+            // C3: this fake-load used to be environment-gated in every
+            // production binary — any process that happened to run with
+            // VITEST set (or NODE_ENV=test) got a silent engine that
+            // could never produce a sample. It is now compile-time
+            // gated: only a build that defines AUDIO_ENGINE_TEST_FALLBACK
+            // (never the CMake default, never the CI release build)
+            // keeps it. The else branch below is the production path.
             status = "paused";
             durationMs = 180000;
             JsonValue loaded = JsonValue::object();
@@ -503,7 +512,9 @@ public:
             loaded["bitDepth"] = bitDepth;
             sendJson(loaded);
             sendPlaybackState();
-        } else {
+        }
+#endif
+        else {
             // No libmpv on this machine: fail the load fast so the renderer
             // degrades to the media element (Chromium decode — audible).
             // A fake "loaded" here would strand the player on a silent
@@ -779,6 +790,37 @@ public:
         mpvLib.unload();
     }
 
+    // C2: the desktop protocol previously had no way to ask the engine
+    // for its current state or its encoder list — the supervisor had to
+    // infer state from events, and getCapabilities() over-reported mp3
+    // as writable when no libmp3lame existed. Both answers now come
+    // from the engine itself, the same probe the JNI side already used.
+    void getState() {
+        std::lock_guard<std::mutex> lock(engineMutex);
+        JsonValue resp = JsonValue::object();
+        resp["type"] = "state";
+        resp["status"] = status;
+        resp["positionMs"] = positionMs;
+        resp["durationMs"] = durationMs;
+        resp["uri"] = currentUri;
+        resp["mpvAvailable"] = mpv != nullptr;
+        resp["pcmTapAvailable"] = mpvLib.set_pcm_callback != nullptr;
+        sendJson(resp);
+    }
+
+    void getTranscodeCapabilities() {
+        bbebee::jni::TranscodeCaps caps = bbebee::jni::probeTranscodeCaps();
+        JsonValue resp = JsonValue::object();
+        resp["type"] = "transcode-capabilities";
+        resp["supported"] = caps.supported;
+        JsonValue encoders = JsonValue::object();
+        for (const auto& kv : caps.encoders) {
+            encoders[kv.first] = kv.second;
+        }
+        resp["encoders"] = encoders;
+        sendJson(resp);
+    }
+
     void getRingBufferStats() {
         RingBufferStats stats = pcmRingBuffer.getStats();
         JsonValue resp = JsonValue::object();
@@ -823,10 +865,35 @@ public:
 
         auto cancelFlag = std::make_shared<std::atomic<bool>>(false);
         {
+            // C1: the desktop layer used to cancel-and-replace a live job
+            // on jobId reuse and had no output registry at all, so two
+            // jobs on one destination raced on rename and both reported
+            // ok. It now matches the JNI contract: a live jobId or a
+            // live output is refused, and the caller must cancel first
+            // and retry.
             std::lock_guard<std::mutex> lock(transcodeMutex);
-            auto it = transcodeJobs.find(opts.jobId);
-            if (it != transcodeJobs.end()) it->second->store(true); // replace: cancel old
+            if (transcodeJobs.find(opts.jobId) != transcodeJobs.end()) {
+                JsonValue resp = JsonValue::object();
+                resp["type"] = "transcode-result";
+                resp["jobId"] = opts.jobId;
+                resp["ok"] = false;
+                resp["error"] = "jobId '" + opts.jobId + "' is already running";
+                sendJson(resp);
+                return;
+            }
+            const std::string outputKey = normalizePathForComparison(opts.outputPath);
+            auto outIt = transcodeOutputs.find(outputKey);
+            if (outIt != transcodeOutputs.end()) {
+                JsonValue resp = JsonValue::object();
+                resp["type"] = "transcode-result";
+                resp["jobId"] = opts.jobId;
+                resp["ok"] = false;
+                resp["error"] = "output '" + opts.outputPath + "' is already being written by job '" + outIt->second + "'";
+                sendJson(resp);
+                return;
+            }
             transcodeJobs[opts.jobId] = cancelFlag;
+            transcodeOutputs[outputKey] = opts.jobId;
         }
 
         JsonValue ack = JsonValue::object();
@@ -834,7 +901,8 @@ public:
         ack["jobId"] = opts.jobId;
         sendJson(ack);
 
-        std::thread([this, opts, cancelFlag]() {
+        const std::string outputKey = normalizePathForComparison(opts.outputPath);
+        std::thread([this, opts, outputKey, cancelFlag]() {
             Transcoder transcoder;
             TranscodeResult r = transcoder.transcode(
                 opts,
@@ -854,6 +922,9 @@ public:
                 auto it = transcodeJobs.find(opts.jobId);
                 if (it != transcodeJobs.end() && it->second == cancelFlag)
                     transcodeJobs.erase(it);
+                auto outIt = transcodeOutputs.find(outputKey);
+                if (outIt != transcodeOutputs.end() && outIt->second == opts.jobId)
+                    transcodeOutputs.erase(outIt);
             }
 
             JsonValue resp = JsonValue::object();
@@ -889,6 +960,9 @@ private:
     std::mutex fftMutex;
     std::mutex transcodeMutex;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> transcodeJobs;
+    // C1: normalized output path -> jobId for live jobs, so two jobs
+    // cannot race on one destination (see transcode()).
+    std::map<std::string, std::string> transcodeOutputs;
 
     std::thread eventThread;
     std::thread visualizerThread;
@@ -1395,6 +1469,10 @@ int main(int argc, char* argv[]) {
     // Stdio IPC Event Loop
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
+        // C4: an unbounded line is an unbounded allocation from a local
+        // caller; 1 MiB is far above any real command (a filter string
+        // is the largest field and stays in the low kilobytes).
+        if (line.size() > 1024 * 1024) continue;
         JsonValue cmd = JsonValue::parse(line);
         if (!cmd.isObject()) continue;
 
@@ -1432,6 +1510,10 @@ int main(int argc, char* argv[]) {
             app.setVisualizer(cmd.get("enabled").asBool(true), cmd.get("fftSize").asInt(128));
         } else if (action == "getRingBufferStats") {
             app.getRingBufferStats();
+        } else if (action == "getState") {
+            app.getState();
+        } else if (action == "getTranscodeCapabilities") {
+            app.getTranscodeCapabilities();
         } else if (action == "transcode") {
             app.transcode(cmd);
         } else if (action == "cancelTranscode") {

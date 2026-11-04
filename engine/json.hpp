@@ -113,7 +113,7 @@ public:
     static JsonValue parse(const std::string& str) {
         size_t pos = 0;
         skipWhitespace(str, pos);
-        return parseValue(str, pos);
+        return parseValue(str, pos, 0);
     }
 
 private:
@@ -186,7 +186,13 @@ private:
         }
     }
 
-    static JsonValue parseValue(const std::string& s, size_t& pos) {
+    // C4: recursive descent with a depth cap. The caller is the local
+    // supervisor, so this is defense in depth, not a trust boundary —
+    // but unbounded recursion on a maliciously nested line would
+    // stack-overflow the sidecar. 64 is far above any real NDJSON
+    // command (the deepest real shape is ~5 levels).
+    static JsonValue parseValue(const std::string& s, size_t& pos, int depth) {
+        if (depth > 64) return JsonValue();
         skipWhitespace(s, pos);
         if (pos >= s.size()) return JsonValue();
 
@@ -200,9 +206,9 @@ private:
         } else if (c == '"') {
             return parseString(s, pos);
         } else if (c == '[') {
-            return parseArray(s, pos);
+            return parseArray(s, pos, depth);
         } else if (c == '{') {
-            return parseObject(s, pos);
+            return parseObject(s, pos, depth);
         } else if (c == '-' || (c >= '0' && c <= '9')) {
             return parseNumber(s, pos);
         }
@@ -320,7 +326,7 @@ private:
         return JsonValue(val);
     }
 
-    static JsonValue parseArray(const std::string& s, size_t& pos) {
+    static JsonValue parseArray(const std::string& s, size_t& pos, int depth) {
         ++pos; // skip '['
         JsonValue arr = JsonValue::array();
         skipWhitespace(s, pos);
@@ -329,7 +335,7 @@ private:
             return arr;
         }
         while (pos < s.size()) {
-            arr.push_back(parseValue(s, pos));
+            arr.push_back(parseValue(s, pos, depth + 1));
             skipWhitespace(s, pos);
             if (pos < s.size() && s[pos] == ',') {
                 ++pos;
@@ -344,7 +350,7 @@ private:
         return arr;
     }
 
-    static JsonValue parseObject(const std::string& s, size_t& pos) {
+    static JsonValue parseObject(const std::string& s, size_t& pos, int depth) {
         ++pos; // skip '{'
         JsonValue obj = JsonValue::object();
         skipWhitespace(s, pos);
@@ -364,7 +370,7 @@ private:
                 break;
             }
             skipWhitespace(s, pos);
-            obj[key] = parseValue(s, pos);
+            obj[key] = parseValue(s, pos, depth + 1);
             skipWhitespace(s, pos);
             if (pos < s.size() && s[pos] == ',') {
                 ++pos;

@@ -60,6 +60,13 @@ add_executable(audio-engine
 target_compile_definitions(audio-engine PRIVATE
     AUDIO_ENGINE_VERSION="${AUDIO_ENGINE_VERSION}")
 
+# C3: the fake-load fallback in main.cpp is compile-time gated and OFF
+# by default; a test build can opt in with -DBBEBEE_TEST_FALLBACK=ON.
+option(BBEBEE_TEST_FALLBACK "Enable the VITEST/NODE_ENV=test fake load (test builds only)" OFF)
+if(BBEBEE_TEST_FALLBACK)
+    target_compile_definitions(audio-engine PRIVATE AUDIO_ENGINE_TEST_FALLBACK)
+endif()
+
 find_package(Threads REQUIRED)
 target_link_libraries(audio-engine PRIVATE Threads::Threads)
 if(HAVE_LIBAV)

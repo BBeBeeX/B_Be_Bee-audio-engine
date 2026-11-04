@@ -19,6 +19,8 @@ typedef void (*mpv_destroy_fn)(mpv_handle*);
 typedef int (*mpv_command_fn)(mpv_handle*, const char**);
 typedef int (*mpv_set_option_string_fn)(mpv_handle*, const char*, const char*);
 typedef int (*mpv_set_property_string_fn)(mpv_handle*, const char*, const char*);
+typedef int (*mpv_get_property_fn)(mpv_handle*, const char*, mpv_format, void*);
+typedef void (*mpv_free_fn)(void*);
 typedef const char* (*mpv_error_string_fn)(int);
 typedef void (*mpv_set_pcm_callback_fn)(mpv_handle*, mpv_pcm_callback_fn, void*);
 
@@ -29,6 +31,8 @@ static mpv_destroy_fn s_mpv_destroy = nullptr;
 static mpv_command_fn s_mpv_command = nullptr;
 static mpv_set_option_string_fn s_mpv_set_option_string = nullptr;
 static mpv_set_property_string_fn s_mpv_set_property_string = nullptr;
+static mpv_get_property_fn s_mpv_get_property = nullptr;
+static mpv_free_fn s_mpv_free = nullptr;
 static mpv_error_string_fn s_mpv_error_string = nullptr;
 static mpv_set_pcm_callback_fn s_mpv_set_pcm_callback = nullptr;
 
@@ -53,6 +57,8 @@ static bool loadIosMpvSymbols() {
     s_mpv_command = (mpv_command_fn)dlsym(s_libmpvHandle, "mpv_command");
     s_mpv_set_option_string = (mpv_set_option_string_fn)dlsym(s_libmpvHandle, "mpv_set_option_string");
     s_mpv_set_property_string = (mpv_set_property_string_fn)dlsym(s_libmpvHandle, "mpv_set_property_string");
+    s_mpv_get_property = (mpv_get_property_fn)dlsym(s_libmpvHandle, "mpv_get_property");
+    s_mpv_free = (mpv_free_fn)dlsym(s_libmpvHandle, "mpv_free");
     s_mpv_error_string = (mpv_error_string_fn)dlsym(s_libmpvHandle, "mpv_error_string");
     s_mpv_set_pcm_callback = (mpv_set_pcm_callback_fn)dlsym(s_libmpvHandle, "mpv_set_pcm_callback");
 
@@ -67,6 +73,7 @@ static bool loadIosMpvSymbols() {
     std::mutex _mutex;
     std::atomic<bool> _pcmTapRegistered;
     std::atomic<bool> _isPlaying;
+    NSString* _currentURI;
 }
 - (void)onPcmFrames:(const float *)samples frames:(int)frames channels:(int)channels sampleRate:(int)sampleRate;
 @end
@@ -153,14 +160,38 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
         _mpv = nullptr;
     }
     _isPlaying.store(false);
+    _currentURI = nil;
     if (_ringBuffer) {
         _ringBuffer->clear();
     }
 }
 
+// E2: gapless re-bind, mirroring desktop/JNI. When the player re-loads
+// the file that is already sounding (playlist auto-advance followed by
+// a load+play of the same file), reloading would seek it back to zero
+// mid-playback. A same-URI load while playing is therefore a no-op
+// that reports success. Comparison strips a file:// prefix and
+// percent-decodes, so `file:///a%20b` matches `/a b`. mpv itself
+// handles file:// percent-decoding on load, so the URI passed to
+// loadfile is left untouched.
+static NSString* iosNormalizedURI(NSString* uri) {
+    NSString* s = uri ?: @"";
+    if ([s hasPrefix:@"file://"]) {
+        s = [s substringFromIndex:7];
+        if ([s hasPrefix:@"localhost/"]) s = [@"/" stringByAppendingString:[s substringFromIndex:10]];
+    }
+    NSString* decoded = [s stringByRemovingPercentEncoding];
+    return decoded ?: s;
+}
+
 - (BOOL)loadURI:(NSString *)uri error:(NSError **)error {
     std::lock_guard<std::mutex> lock(_mutex);
     if (!_mpv || !s_mpv_command) return NO;
+
+    if (_isPlaying.load() && _currentURI &&
+        [iosNormalizedURI(_currentURI) isEqualToString:iosNormalizedURI(uri)]) {
+        return YES;
+    }
 
     const char* cmd[] = { "loadfile", [uri UTF8String], "replace", nullptr };
     int err = s_mpv_command(_mpv, cmd);
@@ -172,8 +203,52 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
         }
         return NO;
     }
+    _currentURI = uri;
     _isPlaying.store(true);
     return YES;
+}
+
+- (NSDictionary *)currentState {
+    std::lock_guard<std::mutex> lock(_mutex);
+    double pos = 0.0, dur = 0.0;
+    int paused = 1;
+    if (_mpv && s_mpv_get_property) {
+        s_mpv_get_property(_mpv, "time-pos", MPV_FORMAT_DOUBLE, &pos);
+        s_mpv_get_property(_mpv, "duration", MPV_FORMAT_DOUBLE, &dur);
+        s_mpv_get_property(_mpv, "pause", MPV_FORMAT_FLAG, &paused);
+    }
+    NSString* status = (!_mpv || !_currentURI) ? @"idle" : (paused ? @"paused" : @"playing");
+    return @{
+        @"status": status,
+        @"positionMs": @(pos * 1000.0),
+        @"durationMs": @(dur * 1000.0),
+        @"uri": _currentURI ?: @"",
+        @"mpvAvailable": @(_mpv != nullptr),
+        @"pcmTapAvailable": @(s_mpv_set_pcm_callback != nullptr),
+    };
+}
+
+- (void)setOutputDevice:(NSString *)deviceId {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_mpv && s_mpv_set_property_string) {
+        NSString* dev = deviceId;
+        if (!dev || dev.length == 0 || [dev isEqualToString:@"default"]) dev = @"auto";
+        s_mpv_set_property_string(_mpv, "audio-device", [dev UTF8String]);
+    }
+}
+
+- (void)setMuted:(BOOL)muted {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_mpv && s_mpv_set_property_string) {
+        s_mpv_set_property_string(_mpv, "mute", muted ? "yes" : "no");
+    }
+}
+
+- (void)setDspConfig:(NSString *)afString {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_mpv && s_mpv_set_property_string) {
+        s_mpv_set_property_string(_mpv, "af", afString ? [afString UTF8String] : "");
+    }
 }
 
 - (void)play {
@@ -198,6 +273,7 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
         const char* cmd[] = { "stop", nullptr };
         s_mpv_command(_mpv, cmd);
         _isPlaying.store(false);
+        _currentURI = nil;
         if (_ringBuffer) _ringBuffer->clear();
     }
 }
@@ -228,6 +304,12 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
 - (BOOL)getFrequencyData:(uint8_t *)outFrequency
           timeDomainData:(nullable uint8_t *)outTimeDomain
                    count:(NSUInteger)count {
+    // E1: every other method that touches _ringBuffer/_fftProcessor holds
+    // _mutex; this one did not, so a call racing destroy() (or another
+    // getFrequencyData) could resize _pcmReadBuffer or drive the
+    // non-thread-safe FftProcessor while it was being torn down. The
+    // JNI getSpectrum already locks for exactly this reason.
+    std::lock_guard<std::mutex> lock(_mutex);
     if (!_ringBuffer || !_fftProcessor || !outFrequency) return NO;
 
     size_t reqFrames = _fftProcessor->getFftSize();
