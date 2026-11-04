@@ -668,6 +668,16 @@ void AudioEngineContext::syncRingBufferFormatLocked() {
 }
 
 bool AudioEngineContext::getSpectrum(uint8_t* outFreqData, uint8_t* outTimeData, size_t binCount, size_t timeCount) {
+    return getStereoSpectrum(outFreqData, outTimeData,
+                             nullptr, nullptr, nullptr, nullptr,
+                             binCount, timeCount, nullptr, nullptr);
+}
+
+bool AudioEngineContext::getStereoSpectrum(uint8_t* outFreqData, uint8_t* outTimeData,
+                                           uint8_t* outLeftFreqData, uint8_t* outLeftTimeData,
+                                           uint8_t* outRightFreqData, uint8_t* outRightTimeData,
+                                           size_t binCount, size_t timeCount,
+                                           int* outChannels, int* outSampleRateHz) {
     // Serialized here, not by the caller: JNI exports no longer serialize
     // on g_contextMutex (see g_engineContext), so destroy() could
     // otherwise run concurrently with this read. No caller holds
@@ -688,22 +698,40 @@ bool AudioEngineContext::getSpectrum(uint8_t* outFreqData, uint8_t* outTimeData,
     }
 
     size_t readFrames = ringBuffer_->read(readPcmBuffer_.data(), reqFrames);
+    // The rate travels with the frame: the processor records it so a
+    // later getSpectrumSampleRateHz (no PCM read) answers for this frame.
+    fftProcessor_->setSampleRateHz(ringBuffer_->getSampleRate());
     fftProcessor_->processInterleaved(readPcmBuffer_.data(), readFrames, channels);
 
     const auto& freq = fftProcessor_->getFrequencyData();
     const auto& time = fftProcessor_->getTimeDomainData();
+    const auto& leftFreq = fftProcessor_->getLeftFrequencyData();
+    const auto& leftTime = fftProcessor_->getLeftTimeDomainData();
+    const auto& rightFreq = fftProcessor_->getRightFrequencyData();
+    const auto& rightTime = fftProcessor_->getRightTimeDomainData();
 
-    if (outFreqData && binCount > 0) {
-        size_t copyBins = std::min(binCount, freq.size());
-        std::memcpy(outFreqData, freq.data(), copyBins);
-    }
+    auto copyOut = [](uint8_t* out, size_t count, const std::vector<uint8_t>& src) {
+        if (out && count > 0) {
+            size_t n = std::min(count, src.size());
+            std::memcpy(out, src.data(), n);
+        }
+    };
+    copyOut(outFreqData, binCount, freq);
+    copyOut(outTimeData, timeCount, time);
+    copyOut(outLeftFreqData, binCount, leftFreq);
+    copyOut(outLeftTimeData, timeCount, leftTime);
+    copyOut(outRightFreqData, binCount, rightFreq);
+    copyOut(outRightTimeData, timeCount, rightTime);
 
-    if (outTimeData && timeCount > 0) {
-        size_t copyTime = std::min(timeCount, time.size());
-        std::memcpy(outTimeData, time.data(), copyTime);
-    }
-
+    if (outChannels) *outChannels = fftProcessor_->getChannels();
+    if (outSampleRateHz) *outSampleRateHz = fftProcessor_->getSampleRateHz();
     return true;
+}
+
+int AudioEngineContext::getSpectrumSampleRateHz() {
+    std::lock_guard<std::mutex> lock(engineMutex_);
+    if (!fftProcessor_) return 0;
+    return fftProcessor_->getSampleRateHz();
 }
 
 audio_engine::RingBufferStats AudioEngineContext::getRingBufferStats() {
@@ -1021,6 +1049,67 @@ JNIEXPORT jboolean JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetSpec
     }
 
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetStereoSpectrum
+  (JNIEnv *env, jobject, jbyteArray outFreqArr, jbyteArray outTimeArr,
+   jbyteArray outLeftFreqArr, jbyteArray outLeftTimeArr,
+   jbyteArray outRightFreqArr, jbyteArray outRightTimeArr) {
+    auto ctx = captureContext();
+    if (!ctx) return 0;
+
+    // One read, one frame: all six arrays come from the same
+    // getStereoSpectrum call, so the channels can never belong to a
+    // different window than the mono pair.
+    // Contract: every frequency array shares one bin count (the mono
+    // array's length) and every time array shares one time count, so a
+    // caller passing mismatched lengths cannot overrun a scratch
+    // buffer — each write-back is capped at its own array length.
+    jsize freqLen = outFreqArr ? env->GetArrayLength(outFreqArr) : 0;
+    jsize timeLen = outTimeArr ? env->GetArrayLength(outTimeArr) : 0;
+
+    std::vector<uint8_t> freqBuf(freqLen > 0 ? freqLen : 1);
+    std::vector<uint8_t> timeBuf(timeLen > 0 ? timeLen : 1);
+    std::vector<uint8_t> leftFreqBuf(freqLen > 0 ? freqLen : 1);
+    std::vector<uint8_t> leftTimeBuf(timeLen > 0 ? timeLen : 1);
+    std::vector<uint8_t> rightFreqBuf(freqLen > 0 ? freqLen : 1);
+    std::vector<uint8_t> rightTimeBuf(timeLen > 0 ? timeLen : 1);
+
+    int channels = 0;
+    int sampleRateHz = 0;
+    bool ok = ctx->getStereoSpectrum(
+        freqLen > 0 ? freqBuf.data() : nullptr,
+        timeLen > 0 ? timeBuf.data() : nullptr,
+        freqLen > 0 ? leftFreqBuf.data() : nullptr,
+        timeLen > 0 ? leftTimeBuf.data() : nullptr,
+        freqLen > 0 ? rightFreqBuf.data() : nullptr,
+        timeLen > 0 ? rightTimeBuf.data() : nullptr,
+        freqLen, timeLen, &channels, &sampleRateHz);
+    if (!ok) return 0;
+
+    auto writeBack = [env](jbyteArray arr, const std::vector<uint8_t>& buf) {
+        if (!arr) return;
+        jsize len = env->GetArrayLength(arr);
+        if (len <= 0) return;
+        jsize n = std::min(len, static_cast<jsize>(buf.size()));
+        env->SetByteArrayRegion(arr, 0, n, reinterpret_cast<const jbyte*>(buf.data()));
+    };
+    writeBack(outFreqArr, freqBuf);
+    writeBack(outTimeArr, timeBuf);
+    writeBack(outLeftFreqArr, leftFreqBuf);
+    writeBack(outLeftTimeArr, leftTimeBuf);
+    writeBack(outRightFreqArr, rightFreqBuf);
+    writeBack(outRightTimeArr, rightTimeBuf);
+    // Channels is the stereo verdict; the sample rate travels with it
+    // via nativeGetSpectrumSampleRateHz (no second PCM read).
+    return static_cast<jint>(channels);
+}
+
+JNIEXPORT jint JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetSpectrumSampleRateHz
+  (JNIEnv *, jobject) {
+    auto ctx = captureContext();
+    if (!ctx) return 0;
+    return static_cast<jint>(ctx->getSpectrumSampleRateHz());
 }
 
 JNIEXPORT jlongArray JNICALL Java_org_bbebee_audio_BBeBeeAudioEngine_nativeGetRingBufferStats

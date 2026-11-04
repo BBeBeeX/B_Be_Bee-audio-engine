@@ -83,6 +83,24 @@ public:
     void setOutputDevice(const std::string& device);
 
     bool getSpectrum(uint8_t* outFreqData, uint8_t* outTimeData, size_t binCount, size_t timeCount);
+    /**
+     * Stereo spectrum in a single read: the mono pair plus the
+     * per-channel pairs, channel count and sample rate of the same
+     * frame. One read per poll is a hard rule — a second getSpectrum
+     * call would drain the next window and the channels would no
+     * longer belong to the same frame — so stereo callers must call
+     * this, never getSpectrum plus a second read. Null stereo
+     * pointers degrade to mono behaviour; getSpectrum delegates here
+     * exactly so, so both paths share one frame logic.
+     * outChannels/outSampleRateHz are null-tolerant.
+     */
+    bool getStereoSpectrum(uint8_t* outFreqData, uint8_t* outTimeData,
+                           uint8_t* outLeftFreqData, uint8_t* outLeftTimeData,
+                           uint8_t* outRightFreqData, uint8_t* outRightTimeData,
+                           size_t binCount, size_t timeCount,
+                           int* outChannels, int* outSampleRateHz);
+    /** Sample rate of the last spectrum frame (0 = unknown). No PCM read. */
+    int getSpectrumSampleRateHz();
     audio_engine::RingBufferStats getRingBufferStats();
     EngineState getState();
     /** How many frequency bins one spectrum frame carries (fftSize / 2). */
