@@ -138,24 +138,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup MSYS2 MinGW-w64
+      # MSYS2 deprecated MINGW64 on 2026-03-15 (no new packages, leaf
+      # packages may be removed): mingw-w64-x86_64-luajit is already gone,
+      # which is what broke this job with "target not found". UCRT64 is
+      # the replacement environment, so every package moves to the
+      # mingw-w64-ucrt-x86_64- prefix. luajit itself is not re-added:
+      # build-windows.sh now builds mpv with -Dlua=disabled (the engine
+      # never runs mpv scripts, same as the Android/iOS builds), so no
+      # Lua runtime is needed at all.
+      - name: Setup MSYS2 UCRT64
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             git
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-binutils
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-meson
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-ffmpeg
-            mingw-w64-x86_64-libass
-            mingw-w64-x86_64-libplacebo
-            mingw-w64-x86_64-uchardet
-            mingw-w64-x86_64-luajit
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-libass
+            mingw-w64-ucrt-x86_64-libplacebo
+            mingw-w64-ucrt-x86_64-uchardet
             zip
 
       - name: Build Patched libmpv & audio-engine
@@ -211,7 +218,13 @@ jobs:
       # Order matters: the JNI bridge links libav statically from the FFmpeg
       # SDK that build-android.sh stages next to libmpv.so, so the mpv/FFmpeg
       # pipeline has to run first.
+      # Pin the NDK explicitly: ubuntu runners pre-set ANDROID_NDK_HOME to
+      # their newest bundled NDK (27.x in the failing log), which would
+      # otherwise silently override the r26b installed above — both here
+      # (build-android.sh reads ANDROID_NDK_HOME first) and in the JNI step.
       - name: Build Genuine libmpv + FFmpeg SDK for Android ABIs
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           for ABI in arm64-v8a x86_64; do
             echo "=== Compiling Genuine libmpv + FFmpeg SDK for ${ABI} ==="
@@ -224,7 +237,8 @@ jobs:
 
       - name: Compile JNI Libraries for Android ABIs
         run: |
-          NDK_PATH="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_NDK:-${{ steps.setup-ndk.outputs.ndk-path }}}}}"
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          NDK_PATH="${NDK_PATH:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_NDK:-}}}}"
           if [ -z "${NDK_PATH}" ] || [ ! -d "${NDK_PATH}" ]; then
             NDK_PATH=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
           fi

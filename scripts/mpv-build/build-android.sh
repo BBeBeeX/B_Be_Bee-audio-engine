@@ -323,8 +323,28 @@ echo "=== [5/10] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/ffmpeg-src"
 git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
 
+# arm64-v8a must build FFmpeg with --disable-asm. This is NOT fixed by
+# the --enable-pic / -fPIC already passed below: FFmpeg n6.1.1's
+# libavutil/aarch64/tx_float_neon.S references the FFT tables
+# ff_tx_tab_*_float (defined in tx_float.c, a different object file)
+# with movrel, which under CONFIG_PIC emits adrp/add directly to the
+# external global. When the static archives are linked into
+# libbbebee_audio_jni.so, lld rejects exactly that relocation
+# ("R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol
+# ff_tx_tab_*_float; recompile with -fPIC") — the message names -fPIC,
+# but no C flag can fix an asm reference to an external global, and
+# upstream master still uses movrel there, so a version bump would not
+# fix it either. Only a tx-only patch would leave the same class of
+# failure lurking in the next asm file (the linker stopped at its error
+# limit on tx alone), and -Wl,-z,notext is not an option: Android
+# refuses to load shared libraries with text relocations. Disabling asm
+# for the SDK is safe here because this FFmpeg copy serves only the JNI
+# transcoder — playback still uses the separately built libmpv.so, which
+# keeps its own assembly — and the C fallbacks are correct, just slower
+# for offline transcodes.
 EXTRA_FF_ARGS=""
 [ "${ABI}" = "x86_64" ] && EXTRA_FF_ARGS="--disable-x86asm"
+[ "${ABI}" = "arm64-v8a" ] && EXTRA_FF_ARGS="--disable-asm"
 
 # The transcoder (engine/transcode.cpp) targets these containers/encoders.
 # Selective enables on top of --disable-encoders/--disable-muxers keep the

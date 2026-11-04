@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Run inside MSYS2 MINGW64 environment (or Git Bash configured with mingw64 toolchain)
+# Run inside MSYS2 UCRT64 environment (or Git Bash configured with a
+# ucrt64 toolchain). MINGW64 is deprecated by MSYS2 since 2026-03-15 and
+# its leaf packages (notably luajit) are being removed, so the CI job
+# installs the mingw-w64-ucrt-x86_64- package set instead.
 set -euo pipefail
 
 MPV_VERSION="${1:-v0.41.0}"
@@ -42,7 +45,13 @@ meson setup build \
     -Dlibmpv=true \
     -Dcplayer=false \
     -Dwasapi=enabled \
+    -Dlua=disabled \
     -Dc_args='-Wno-deprecated-declarations'
+# -Dlua=disabled is load-bearing, not cosmetic: the engine talks to
+# libmpv only through the C API and never loads mpv scripts, so Lua
+# buys nothing here — and luajit no longer exists as a MINGW64 package
+# in MSYS2, so leaving lua on "auto" would fail the CI install step
+# before meson even runs. Android/iOS already build with lua disabled.
 
 echo "Compiling libmpv with Ninja..."
 ninja -C build
@@ -66,7 +75,7 @@ bundle_windows_deps() {
     if [ -n "${MINGW_PREFIX:-}" ]; then
         search_dirs+=("${MINGW_PREFIX}/bin")
     fi
-    search_dirs+=("/mingw64/bin" "/c/msys64/mingw64/bin")
+    search_dirs+=("/ucrt64/bin" "/c/msys64/ucrt64/bin" "/mingw64/bin" "/c/msys64/mingw64/bin")
 
     # Include dirs from PATH
     IFS=':' read -r -a path_dirs <<< "${PATH:-}"
