@@ -587,13 +587,24 @@ cpu = '${CPU}'
 endian = 'little'
 CROSSFILE
 
+  # -Daaudio=disabled is load-bearing: mpv v0.41's audio/out/ao_aaudio.c
+  # uses AAUDIO_FORMAT_IEC61937 unconditionally at compile time (the
+  # `device_api >= 34` check next to it is runtime-only), but that symbol
+  # exists only in API 34+ headers, while this build targets API 26
+  # (API_LEVEL above, JNI platform android-26). With the pinned NDK r26b
+  # the API 26 header does not declare it and the mpv build dies at
+  # ao_aaudio.c:289. Upstream master still has the same unguarded line,
+  # so a mpv version bump would not fix it, and raising the whole build
+  # to API 34 would drop pre-Android-14 devices. Disabling aaudio loses
+  # no playback path here: engine/jni/bbebee_audio_jni.cpp sets
+  # ao="opensles,audiotrack" explicitly, so aaudio is never selected.
   meson setup build \
     --cross-file "${CROSS_FILE}" \
     --default-library shared \
     -Dlibmpv=true \
     -Dcplayer=false \
     -Daudiotrack=enabled \
-    -Daaudio=enabled \
+    -Daaudio=disabled \
     -Dopensles=enabled \
     -Dalsa=disabled \
     -Dpulse=disabled \

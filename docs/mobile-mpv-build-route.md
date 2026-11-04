@@ -26,9 +26,8 @@ The audio engine strictly requires high-fidelity audio playback, DSP filters, an
 ### Audio Output (AO) Backends
 - **Android**:
   - `opensles`: OpenSL ES audio output (universal Android compatibility)
-  - `aaudio`: Low-latency modern Android AAudio backend
   - `audiotrack`: Android Java AudioTrack bridge
-  - **Pruned**: `alsa`, `pulse`, `pipewire`, `jack`, `sndio`, `oss-audio` explicitly disabled
+  - **Pruned**: `alsa`, `pulse`, `pipewire`, `jack`, `sndio`, `oss-audio` explicitly disabled, and `aaudio` disabled too — mpv v0.41's `ao_aaudio.c` needs the API 34+ symbol `AAUDIO_FORMAT_IEC61937` at compile time, which the API 26 build headers do not provide; the engine sets `ao="opensles,audiotrack"` explicitly, so aaudio is never selected anyway
 - **iOS**:
   - `audiounit`: Apple AudioUnit low-latency output
   - `coreaudio`: CoreAudio hardware output
@@ -119,7 +118,7 @@ meson setup "${BUILD_DIR}" \
   -Dlibmpv=true \
   -Dcplayer=false \
   -Daudiotrack=enabled \
-  -Daaudio=enabled \
+  -Daaudio=disabled \
   -Dopensles=enabled \
   -Dalsa=disabled \
   -Dpulse=disabled \
