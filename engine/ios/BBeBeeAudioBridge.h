@@ -25,6 +25,13 @@ typedef struct {
 
 /**
  * Initialize audio engine with optional configuration directory path.
+ *
+ * Init never creates the mpv core: playback touches (loadURI, the
+ * persistent setters, play/pause) create it lazily on first use, and
+ * read-only queries plus the transcode surface never create it at
+ * all. A transcode-only instance therefore costs no playback core.
+ * isMpvAvailable and currentState's mpvAvailable report whether the
+ * libmpv symbols are linked, not whether a core exists.
  */
 - (instancetype)initWithConfigDirectory:(nullable NSString *)configDir error:(NSError * _Nullable * _Nullable)error;
 

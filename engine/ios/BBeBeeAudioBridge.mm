@@ -71,6 +71,7 @@ static bool loadIosMpvSymbols() {
 
 @interface BBeBeeAudioBridge () {
     mpv_handle* _mpv;
+    NSString* _configDir;
     std::unique_ptr<audio_engine::PcmRingBuffer> _ringBuffer;
     std::unique_ptr<audio_engine::FftProcessor> _fftProcessor;
     std::vector<float> _pcmReadBuffer;
@@ -88,6 +89,11 @@ static bool loadIosMpvSymbols() {
     dispatch_queue_t _transcodeQueue;
 }
 - (void)onPcmFrames:(const float *)samples frames:(int)frames channels:(int)channels sampleRate:(int)sampleRate;
+// Create the mpv core on first playback touch. Must be called with
+// _mutex held. Read-only queries (currentState, isMpvAvailable) and
+// the transcode surface deliberately do NOT call it, so a bridge
+// instance used only for transcode never spins up a playback core.
+- (BOOL)ensureMpvWithError:(NSError **)error;
 @end
 
 static void iosPcmCallback(const float* data, int frames, int channels, int sample_rate, void* user_data) {
@@ -103,7 +109,12 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
     self = [super init];
     if (!self) return nil;
 
+    // Kept for source compatibility: init never fails anymore — mpv
+    // creation moved to ensureMpvWithError, so a transcode-only
+    // instance needs no playback core and reports no init error.
+    (void)error;
     _mpv = nullptr;
+    _configDir = configDir;
     _pcmTapRegistered.store(false);
     _isPlaying.store(false);
     _transcodeQueue = dispatch_queue_create("org.bbebee.audio.transcode", DISPATCH_QUEUE_CONCURRENT);
@@ -112,48 +123,64 @@ static void iosPcmCallback(const float* data, int frames, int channels, int samp
     _ringBuffer->configure(44100, 2, 8192);
     _pcmReadBuffer.resize(2048 * 2);
 
+    // Symbol resolution only — dlsym is cheap and creates nothing.
+    // The mpv core itself is created lazily by ensureMpvWithError on
+    // the first playback touch, so a transcode-only instance stays
+    // free of an idle playback core.
     if (!loadIosMpvSymbols()) {
         NSLog(@"[BBeBeeAudioBridge] Warning: libmpv symbols unavailable. Running in stub mode.");
-        return self;
     }
 
-    _mpv = s_mpv_create();
-    if (!_mpv) {
+    return self;
+}
+
+- (BOOL)ensureMpvWithError:(NSError **)error {
+    if (_mpv) return YES;
+    if (!loadIosMpvSymbols()) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"org.bbebee.audio" code:-1
+                                     userInfo:@{NSLocalizedDescriptionKey: @"libmpv symbols unavailable"}];
+        }
+        return NO;
+    }
+
+    mpv_handle* mpv = s_mpv_create();
+    if (!mpv) {
         if (error) {
             *error = [NSError errorWithDomain:@"org.bbebee.audio" code:-1
                                      userInfo:@{NSLocalizedDescriptionKey: @"Failed to create mpv instance"}];
         }
-        return nil;
+        return NO;
     }
 
-    if (configDir && s_mpv_set_option_string) {
-        s_mpv_set_option_string(_mpv, "config-dir", [configDir UTF8String]);
+    if (_configDir && s_mpv_set_option_string) {
+        s_mpv_set_option_string(mpv, "config-dir", [_configDir UTF8String]);
     }
 
     if (s_mpv_set_option_string) {
-        s_mpv_set_option_string(_mpv, "video", "no");
-        s_mpv_set_option_string(_mpv, "ao", "audiounit,coreaudio");
+        s_mpv_set_option_string(mpv, "video", "no");
+        s_mpv_set_option_string(mpv, "ao", "audiounit,coreaudio");
     }
 
-    int initErr = s_mpv_initialize(_mpv);
+    int initErr = s_mpv_initialize(mpv);
     if (initErr < 0) {
         const char* errStr = s_mpv_error_string ? s_mpv_error_string(initErr) : "unknown";
         if (error) {
             *error = [NSError errorWithDomain:@"org.bbebee.audio" code:initErr
                                      userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithUTF8String:errStr]}];
         }
-        s_mpv_destroy(_mpv);
-        _mpv = nullptr;
-        return nil;
+        s_mpv_destroy(mpv);
+        return NO;
     }
 
     if (s_mpv_set_pcm_callback) {
-        s_mpv_set_pcm_callback(_mpv, iosPcmCallback, (__bridge void*)self);
+        s_mpv_set_pcm_callback(mpv, iosPcmCallback, (__bridge void*)self);
         _pcmTapRegistered.store(true);
         NSLog(@"[BBeBeeAudioBridge] libmpv PCM tap registered successfully on iOS.");
     }
 
-    return self;
+    _mpv = mpv;
+    return YES;
 }
 
 - (void)dealloc {
@@ -208,7 +235,7 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (BOOL)loadURI:(NSString *)uri error:(NSError **)error {
     std::lock_guard<std::mutex> lock(_mutex);
-    if (!_mpv || !s_mpv_command) return NO;
+    if (![self ensureMpvWithError:error]) return NO;
 
     if (_isPlaying.load() && _currentURI &&
         [iosNormalizedURI(_currentURI) isEqualToString:iosNormalizedURI(uri)]) {
@@ -245,13 +272,21 @@ static NSString* iosNormalizedURI(NSString* uri) {
         @"positionMs": @(pos * 1000.0),
         @"durationMs": @(dur * 1000.0),
         @"uri": _currentURI ?: @"",
-        @"mpvAvailable": @(_mpv != nullptr),
+        // mpvAvailable means the symbols are linked, not that a core was
+        // created: with lazy init, a fresh instance that never touched
+        // playback still has mpv available, and this query must not be
+        // the thing that creates the core.
+        @"mpvAvailable": @((s_mpv_create && s_mpv_initialize && s_mpv_destroy && s_mpv_command) ? YES : NO),
         @"pcmTapAvailable": @(s_mpv_set_pcm_callback != nullptr),
     };
 }
 
 - (void)setOutputDevice:(NSString *)deviceId {
     std::lock_guard<std::mutex> lock(_mutex);
+    // A setting applied before the first load must survive to it, so
+    // setters are playback touches too: they create the core rather
+    // than silently dropping the value the way a nil-mpv guard would.
+    [self ensureMpvWithError:nil];
     if (_mpv && s_mpv_set_property_string) {
         NSString* dev = deviceId;
         if (!dev || dev.length == 0 || [dev isEqualToString:@"default"]) dev = @"auto";
@@ -261,6 +296,7 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (void)setMuted:(BOOL)muted {
     std::lock_guard<std::mutex> lock(_mutex);
+    [self ensureMpvWithError:nil];
     if (_mpv && s_mpv_set_property_string) {
         s_mpv_set_property_string(_mpv, "mute", muted ? "yes" : "no");
     }
@@ -268,6 +304,7 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (void)setDspConfig:(NSString *)afString {
     std::lock_guard<std::mutex> lock(_mutex);
+    [self ensureMpvWithError:nil];
     if (_mpv && s_mpv_set_property_string) {
         s_mpv_set_property_string(_mpv, "af", afString ? [afString UTF8String] : "");
     }
@@ -378,6 +415,7 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (void)play {
     std::lock_guard<std::mutex> lock(_mutex);
+    [self ensureMpvWithError:nil];
     if (_mpv && s_mpv_set_property_string) {
         s_mpv_set_property_string(_mpv, "pause", "no");
         _isPlaying.store(true);
@@ -386,6 +424,7 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (void)pause {
     std::lock_guard<std::mutex> lock(_mutex);
+    [self ensureMpvWithError:nil];
     if (_mpv && s_mpv_set_property_string) {
         s_mpv_set_property_string(_mpv, "pause", "yes");
         _isPlaying.store(false);
@@ -394,6 +433,9 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (void)stop {
     std::lock_guard<std::mutex> lock(_mutex);
+    // Stop on a never-played instance must stay a no-op, not create a
+    // core just to stop it — unlike the setters, it has no value to
+    // preserve, so it deliberately does not ensure.
     if (_mpv && s_mpv_command) {
         const char* cmd[] = { "stop", nullptr };
         s_mpv_command(_mpv, cmd);
@@ -405,6 +447,8 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (void)seekToSeconds:(double)seconds {
     std::lock_guard<std::mutex> lock(_mutex);
+    // Seek has no persistent value (unlike volume/mute/DSP), so like
+    // stop it stays a no-op on a never-played instance.
     if (_mpv && s_mpv_command) {
         NSString *secStr = [NSString stringWithFormat:@"%.3f", seconds];
         const char* cmd[] = { "seek", [secStr UTF8String], "absolute", nullptr };
@@ -414,6 +458,9 @@ static NSString* iosNormalizedURI(NSString* uri) {
 
 - (void)setVolume:(double)volume {
     std::lock_guard<std::mutex> lock(_mutex);
+    // Volume is a persistent setting like mute/DSP: applied before the
+    // first load, it must survive to it, so this ensures the core.
+    [self ensureMpvWithError:nil];
     if (_mpv && s_mpv_set_property_string) {
         NSString *volStr = [NSString stringWithFormat:@"%.1f", volume];
         s_mpv_set_property_string(_mpv, "volume", [volStr UTF8String]);
@@ -476,7 +523,8 @@ static NSString* iosNormalizedURI(NSString* uri) {
 }
 
 - (BOOL)isMpvAvailable {
-    return _mpv != nullptr;
+    // Symbols, not a created core — see currentState's mpvAvailable.
+    return (s_mpv_create && s_mpv_initialize && s_mpv_destroy && s_mpv_command) ? YES : NO;
 }
 
 - (BOOL)isPcmTapAvailable {
