@@ -25,19 +25,27 @@ LIBASS_VERSION="0.17.2"
 FREETYPE_VERSION="VER-2-13-2"
 FRIBIDI_VERSION="v1.0.14"
 HARFBUZZ_VERSION="8.3.0"
-# iOS transcode: external encoder libraries, same versions and pins as
+# iOS transcode: external encoder libraries, same versions as
 # build-android.sh (the transcode matrix is shared across platforms, so
 # the encoder backends must be too). These are built BEFORE FFmpeg's
 # configure runs — FFmpeg only enables libmp3lame/libvorbis/libopus
 # when their headers are discoverable at configure time.
+#
+# Provenance differs from Android on purpose: Android clones the xiph
+# git tags and runs autogen.sh (its workflow installs autoconf,
+# automake, libtool). iOS uses the xiph release tarballs instead,
+# pinned by sha256 below — release tarballs ship a pre-generated
+# ./configure, while the git tags ship only configure.ac, and the
+# git-based step died on Macs without autoconf (autoreconf: command
+# not found, exit 127). No machine building iOS needs autotools now.
 LAME_VERSION="3.100"
 LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
-LIBOGG_VERSION="v1.3.5"
-LIBOGG_COMMIT="e1774cd77f471443541596e09078e78fdc342e4f"
-LIBVORBIS_VERSION="v1.3.7"
-LIBVORBIS_COMMIT="0657aee69dec8508a0011f47f3b69d7538e9d262"
-LIBOPUS_VERSION="v1.4"
-LIBOPUS_COMMIT="82ac57d9f1aaf575800cf17373348e45b7ce6c0d"
+LIBOGG_VERSION="1.3.5"
+LIBOGG_SHA256="0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664"
+LIBVORBIS_VERSION="1.3.7"
+LIBVORBIS_SHA256="0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab"
+LIBOPUS_VERSION="1.4"
+LIBOPUS_SHA256="c9b32b4253be5ae63d1ff16eea06b94b5f0f2951b7a02aceef58e3a3ce49c51f"
 # Same selective encoder/muxer set as Android: every entry of
 # resolveTranscodeTarget() must actually resolve, nothing more.
 TRANSCODE_ENCODERS="aac alac flac pcm_s16le pcm_s24le pcm_f32le wmav2 libmp3lame libvorbis libopus"
@@ -82,21 +90,22 @@ verify_sha256() {
   fi
 }
 
-# xiph sources ship autogen.sh, not configure; run it once per source
-# tree (same helper as build-android.sh).
-bootstrap_autotools() {
-  local src_dir="$1"
-  if [ ! -f "${src_dir}/configure" ]; then
-    if [ ! -f "${src_dir}/autogen.sh" ]; then
-      echo "ERROR: ${src_dir} has neither ./configure nor autogen.sh." >&2
-      exit 1
-    fi
-    (cd "${src_dir}" && NOCONFIGURE=1 ./autogen.sh)
+# Download a release tarball once, verify its sha256 before anything
+# is extracted from it (same rule as LAME), and extract it into a
+# per-slice build dir. The tarball is verified on every run, not only
+# on download, so a corrupt file can never slip through a re-run.
+extract_tarball() {
+  local url="$1"
+  local expected_sha="$2"
+  local tarball="$3"
+  local dest="$4"
+  local file="${WORK_DIR}/${tarball}"
+  if [ ! -f "${file}" ]; then
+    curl -fL -o "${file}" "${url}"
   fi
-  if [ ! -f "${src_dir}/configure" ]; then
-    echo "ERROR: autogen.sh did not generate ${src_dir}/configure." >&2
-    exit 1
-  fi
+  verify_sha256 "${file}" "${expected_sha}"
+  rm -rf "${dest}"; mkdir -p "${dest}"
+  tar -xz -C "${dest}" --strip-components=1 -f "${file}"
 }
 
 echo "=========================================================="
@@ -194,20 +203,16 @@ endian = 'little'
 CROSSFILE
 
   # 0. Build external encoder libraries for this iOS slice, BEFORE
-  # FFmpeg's configure (see the top-of-file note). Unlike Android,
-  # three slices share one script run and one source tree, so each
-  # build runs in a per-slice copy — configuring in the shared source
-  # dir would pollute it for the next slice.
+  # FFmpeg's configure (see the top-of-file note). Each library is
+  # extracted into a per-slice build dir (three slices share one
+  # script run, so configuring in a shared tree would pollute it for
+  # the next slice) and configured there — the tarballs already
+  # contain ./configure, so no autogen step runs at all.
   echo "--- [1/7] Compiling external encoder libraries for ${slice_name} ---"
 
-  if [ ! -d "${WORK_DIR}/ogg-src" ]; then
-    git clone --depth 1 --branch "${LIBOGG_VERSION}" https://github.com/xiph/ogg.git "${WORK_DIR}/ogg-src"
-    verify_git_head "${WORK_DIR}/ogg-src" "${LIBOGG_COMMIT}"
-    bootstrap_autotools "${WORK_DIR}/ogg-src"
-  fi
   local ogg_build="${WORK_DIR}/ogg_${slice_name}"
-  rm -rf "${ogg_build}"; mkdir -p "${ogg_build}"
-  cp -r "${WORK_DIR}/ogg-src"/. "${ogg_build}/"
+  extract_tarball "https://downloads.xiph.org/releases/ogg/libogg-${LIBOGG_VERSION}.tar.gz" \
+    "${LIBOGG_SHA256}" "libogg-${LIBOGG_VERSION}.tar.gz" "${ogg_build}"
   (
     cd "${ogg_build}"
     ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
@@ -237,14 +242,9 @@ CROSSFILE
     make install
   )
 
-  if [ ! -d "${WORK_DIR}/vorbis-src" ]; then
-    git clone --depth 1 --branch "${LIBVORBIS_VERSION}" https://github.com/xiph/vorbis.git "${WORK_DIR}/vorbis-src"
-    verify_git_head "${WORK_DIR}/vorbis-src" "${LIBVORBIS_COMMIT}"
-    bootstrap_autotools "${WORK_DIR}/vorbis-src"
-  fi
   local vorbis_build="${WORK_DIR}/vorbis_${slice_name}"
-  rm -rf "${vorbis_build}"; mkdir -p "${vorbis_build}"
-  cp -r "${WORK_DIR}/vorbis-src"/. "${vorbis_build}/"
+  extract_tarball "https://downloads.xiph.org/releases/vorbis/libvorbis-${LIBVORBIS_VERSION}.tar.gz" \
+    "${LIBVORBIS_SHA256}" "libvorbis-${LIBVORBIS_VERSION}.tar.gz" "${vorbis_build}"
   (
     cd "${vorbis_build}"
     ./configure --host="${host_triple}" --prefix="${slice_prefix}" \
@@ -256,14 +256,9 @@ CROSSFILE
     make install
   )
 
-  if [ ! -d "${WORK_DIR}/opus-src" ]; then
-    git clone --depth 1 --branch "${LIBOPUS_VERSION}" https://github.com/xiph/opus.git "${WORK_DIR}/opus-src"
-    verify_git_head "${WORK_DIR}/opus-src" "${LIBOPUS_COMMIT}"
-    bootstrap_autotools "${WORK_DIR}/opus-src"
-  fi
   local opus_build="${WORK_DIR}/opus_${slice_name}"
-  rm -rf "${opus_build}"; mkdir -p "${opus_build}"
-  cp -r "${WORK_DIR}/opus-src"/. "${opus_build}/"
+  extract_tarball "https://downloads.xiph.org/releases/opus/opus-${LIBOPUS_VERSION}.tar.gz" \
+    "${LIBOPUS_SHA256}" "opus-${LIBOPUS_VERSION}.tar.gz" "${opus_build}"
   (
     cd "${opus_build}"
     ./configure --host="${host_triple}" --prefix="${slice_prefix}" \

@@ -353,14 +353,24 @@ verify_git_head "${WORK_DIR}/ffmpeg-src" "${FFMPEG_COMMIT}"
 # fix it either. Only a tx-only patch would leave the same class of
 # failure lurking in the next asm file (the linker stopped at its error
 # limit on tx alone), and -Wl,-z,notext is not an option: Android
-# refuses to load shared libraries with text relocations. Disabling asm
-# for the SDK is safe here because this FFmpeg copy serves only the JNI
-# transcoder — playback still uses the separately built libmpv.so, which
-# keeps its own assembly — and the C fallbacks are correct, just slower
-# for offline transcodes.
-EXTRA_FF_ARGS=""
-[ "${ABI}" = "x86_64" ] && EXTRA_FF_ARGS="--disable-x86asm"
-[ "${ABI}" = "arm64-v8a" ] && EXTRA_FF_ARGS="--disable-asm"
+# refuses to load shared libraries with text relocations.
+#
+# x86_64 hit the same class in CI (2026-11-04): lld rejected
+# R_X86_64_PC32 relocations from the cavsdsp mmxext objects against
+# the ff_pw_* constants when linking libbbebee_audio_jni.so — and this
+# despite --disable-x86asm already being passed for x86_64, so that
+# narrower flag does not keep these objects out of n6.1.1's build.
+# Both ABIs therefore get the whole --disable-asm now.
+#
+# Honest scope note (correcting the earlier comment): this FFmpeg
+# build is NOT transcoder-only. mpv's crossfile below points at this
+# same prefix, so libmpv.so embeds this same libav — --disable-asm
+# makes playback decode use C fallbacks on these ABIs too. That is
+# correct, just slower, and acceptable: arm64 is the real-device ABI
+# where correctness outranks DSP speed, and x86_64 Android is
+# overwhelmingly emulator. The C fallbacks are the same code paths
+# FFmpeg uses on targets without asm support.
+EXTRA_FF_ARGS="--disable-asm"
 
 # The transcoder (engine/transcode.cpp) targets these containers/encoders.
 # Selective enables on top of --disable-encoders/--disable-muxers keep the
