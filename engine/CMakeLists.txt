@@ -107,6 +107,13 @@ if(UNIX)
 endif()
 add_test(NAME audio-engine-tests COMMAND audio-engine-tests)
 
+# Per-channel FFT checks: stereo extraction, mono clearing, sample rate.
+add_executable(audio-engine-fft-stereo-tests
+    tests/test_fft_stereo.cpp
+    fft.hpp
+)
+add_test(NAME audio-engine-fft-stereo-tests COMMAND audio-engine-fft-stereo-tests)
+
 # Transcode tests (separate binary: test_pcm_tap.cpp has its own main()).
 add_executable(audio-engine-transcode-tests
     tests/test_transcode.cpp

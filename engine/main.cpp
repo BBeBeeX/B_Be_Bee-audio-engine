@@ -1312,9 +1312,36 @@ private:
         }
     }
 
-    void sendFftFrame(const std::vector<uint8_t>& freq, const std::vector<uint8_t>& timeDom) {
+    // fft-frame NDJSON. The mono pair is always present, so old
+    // consumers keep working unchanged. `channels` and
+    // `sampleRateHz` are always present too (the loop already knows
+    // both from the stream). The per-channel arrays are present only
+    // when channels >= 2: a mono frame must never carry left/right
+    // arrays, or a downstream reader could mistake the mono mix for
+    // stereo. Consumers must check `channels`, not array presence
+    // alone, before treating a frame as stereo.
+    void sendFftFrame(
+        const std::vector<uint8_t>& freq,
+        const std::vector<uint8_t>& timeDom,
+        int channels,
+        int sampleRateHz,
+        const std::vector<uint8_t>* leftFreq = nullptr,
+        const std::vector<uint8_t>* leftTime = nullptr,
+        const std::vector<uint8_t>* rightFreq = nullptr,
+        const std::vector<uint8_t>* rightTime = nullptr
+    ) {
+        auto appendArray = [](std::string& out, const char* name, const std::vector<uint8_t>& values) {
+            out += ",\"";
+            out += name;
+            out += "\":[";
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (i > 0) out += ',';
+                out += std::to_string(static_cast<int>(values[i]));
+            }
+            out += ']';
+        };
         std::string frameJson;
-        frameJson.reserve(128 + freq.size() * 4 + timeDom.size() * 4);
+        frameJson.reserve(256 + freq.size() * 4 + timeDom.size() * 4);
         frameJson += "{\"type\":\"fft-frame\",\"frequencyData\":[";
         for (size_t i = 0; i < freq.size(); ++i) {
             if (i > 0) frameJson += ',';
@@ -1325,7 +1352,18 @@ private:
             if (i > 0) frameJson += ',';
             frameJson += std::to_string(static_cast<int>(timeDom[i]));
         }
-        frameJson += "]}";
+        frameJson += ']';
+        frameJson += ",\"channels\":";
+        frameJson += std::to_string(channels);
+        frameJson += ",\"sampleRateHz\":";
+        frameJson += std::to_string(sampleRateHz);
+        if (channels >= 2 && leftFreq && leftTime && rightFreq && rightTime) {
+            appendArray(frameJson, "leftFrequencyData", *leftFreq);
+            appendArray(frameJson, "leftTimeDomainData", *leftTime);
+            appendArray(frameJson, "rightFrequencyData", *rightFreq);
+            appendArray(frameJson, "rightTimeDomainData", *rightTime);
+        }
+        frameJson += "}";
 
         std::lock_guard<std::mutex> lock(ioMutex);
         std::cout << frameJson << "\n" << std::flush;
@@ -1368,20 +1406,31 @@ private:
                 }
                 std::vector<uint8_t> freqData;
                 std::vector<uint8_t> timeData;
+                std::vector<uint8_t> leftFreqData;
+                std::vector<uint8_t> leftTimeData;
+                std::vector<uint8_t> rightFreqData;
+                std::vector<uint8_t> rightTimeData;
                 bool shouldSend = false;
                 {
                     std::lock_guard<std::mutex> fLock(fftMutex);
                     fftProcessor.reset();
                     if (zeroFramesSent < 2) {
                         zeroFramesSent++;
+                        fftProcessor.setSampleRateHz(currentSr);
                         fftProcessor.processInterleaved(nullptr, 0, currentChannels);
                         freqData = fftProcessor.getFrequencyData();
                         timeData = fftProcessor.getTimeDomainData();
+                        leftFreqData = fftProcessor.getLeftFrequencyData();
+                        leftTimeData = fftProcessor.getLeftTimeDomainData();
+                        rightFreqData = fftProcessor.getRightFrequencyData();
+                        rightTimeData = fftProcessor.getRightTimeDomainData();
                         shouldSend = true;
                     }
                 }
                 if (shouldSend) {
-                    sendFftFrame(freqData, timeData);
+                    sendFftFrame(
+                        freqData, timeData, currentChannels, currentSr,
+                        &leftFreqData, &leftTimeData, &rightFreqData, &rightTimeData);
                 } else {
                     std::this_thread::sleep_for(std::chrono::milliseconds(70));
                 }
@@ -1413,8 +1462,13 @@ private:
 
             std::vector<uint8_t> freqData;
             std::vector<uint8_t> timeData;
+            std::vector<uint8_t> leftFreqData;
+            std::vector<uint8_t> leftTimeData;
+            std::vector<uint8_t> rightFreqData;
+            std::vector<uint8_t> rightTimeData;
             {
                 std::lock_guard<std::mutex> fLock(fftMutex);
+                fftProcessor.setSampleRateHz(currentSr);
                 fftProcessor.processInterleaved(
                     framesRead > 0 ? pcmChunk.data() : nullptr,
                     framesRead,
@@ -1422,9 +1476,15 @@ private:
                 );
                 freqData = fftProcessor.getFrequencyData();
                 timeData = fftProcessor.getTimeDomainData();
+                leftFreqData = fftProcessor.getLeftFrequencyData();
+                leftTimeData = fftProcessor.getLeftTimeDomainData();
+                rightFreqData = fftProcessor.getRightFrequencyData();
+                rightTimeData = fftProcessor.getRightTimeDomainData();
             }
 
-            sendFftFrame(freqData, timeData);
+            sendFftFrame(
+                freqData, timeData, currentChannels, currentSr,
+                &leftFreqData, &leftTimeData, &rightFreqData, &rightTimeData);
         }
     }
 
