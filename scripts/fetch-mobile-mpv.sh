@@ -11,6 +11,14 @@ CACHE_DIR="${MOBILE_MPV_CACHE_DIR:-${ROOT_DIR}/.cache/mobile-mpv}"
 echo "=========================================================="
 echo " BBeBee Mobile libmpv Fetcher & Integrity Verifier"
 echo "=========================================================="
+# B2, stated plainly: the "verification" below is a shape check, not a
+# tamper check. A .so with >= 50 dynamic symbols and an mpv_create export
+# passes it, malicious or not. It exists to catch a truncated or stub
+# binary, not to authenticate one. Real authentication is: prefer a
+# locally built binary (steps 0-1, which always win over a download),
+# require https for any download, and — when the caller has one — check
+# the expected sha256 (MOBILE_MPV_ANDROID_<abi>_SHA256 /
+# MOBILE_MPV_IOS_SHA256) before the shape check runs.
 echo "Platform target: ${PLATFORM}"
 echo "Output dir:      ${OUTPUT_DIR}"
 echo "Cache dir:       ${CACHE_DIR}"
@@ -153,8 +161,29 @@ stage_android() {
   local dl_url_var="MOBILE_MPV_ANDROID_${abi//-/_}_URL"
   local dl_url="${!dl_url_var:-${MOBILE_MPV_ANDROID_URL:-}}"
   if [ -n "${dl_url}" ]; then
+    # B2: a binary must never be fetched over plain http, and when the
+    # caller pins a sha256 it is checked before any shape check runs.
+    case "${dl_url}" in
+      https://*) ;;
+      *) echo "ERROR: refusing non-https libmpv download URL: ${dl_url}" >&2; exit 1 ;;
+    esac
     echo "Downloading ${abi} libmpv from ${dl_url}..."
     if curl -fSL -o "${cached_so}" "${dl_url}"; then
+      local sha_var="MOBILE_MPV_ANDROID_${abi//-/_}_SHA256"
+      local expected_sha="${!sha_var:-}"
+      if [ -n "${expected_sha}" ]; then
+        local actual_sha=""
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual_sha="$(sha256sum "${cached_so}" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+          actual_sha="$(shasum -a 256 "${cached_so}" | awk '{print $1}')"
+        fi
+        if [ "${actual_sha}" != "${expected_sha}" ]; then
+          rm -f "${cached_so}"
+          echo "ERROR: downloaded libmpv sha256 mismatch for ${abi}" >&2
+          exit 1
+        fi
+      fi
       if verify_real_android_so "${cached_so}" "${abi}"; then
         mkdir -p "${OUTPUT_DIR}/android/${abi}"
         cp "${cached_so}" "${target_so}"
@@ -219,9 +248,27 @@ stage_ios() {
   # 3. Download if custom URL provided
   local dl_url="${MOBILE_MPV_IOS_URL:-}"
   if [ -n "${dl_url}" ]; then
+    # B2: same https + optional sha256 rule as the Android path above.
+    case "${dl_url}" in
+      https://*) ;;
+      *) echo "ERROR: refusing non-https mpv.framework download URL: ${dl_url}" >&2; exit 1 ;;
+    esac
     echo "Downloading iOS mpv.framework from ${dl_url}..."
     mkdir -p "${CACHE_DIR}/ios_dl"
     if curl -fSL -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" "${dl_url}"; then
+      if [ -n "${MOBILE_MPV_IOS_SHA256:-}" ]; then
+        local actual_sha=""
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual_sha="$(sha256sum "${CACHE_DIR}/ios_dl/mpv.framework.zip" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+          actual_sha="$(shasum -a 256 "${CACHE_DIR}/ios_dl/mpv.framework.zip" | awk '{print $1}')"
+        fi
+        if [ "${actual_sha}" != "${MOBILE_MPV_IOS_SHA256}" ]; then
+          rm -rf "${CACHE_DIR}/ios_dl"
+          echo "ERROR: downloaded mpv.framework.zip sha256 mismatch" >&2
+          exit 1
+        fi
+      fi
       rm -rf "${CACHE_DIR}/ios_dl/extracted"
       mkdir -p "${CACHE_DIR}/ios_dl/extracted"
       unzip -q -o "${CACHE_DIR}/ios_dl/mpv.framework.zip" -d "${CACHE_DIR}/ios_dl/extracted/"

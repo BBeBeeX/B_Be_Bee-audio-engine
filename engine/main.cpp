@@ -1381,7 +1381,10 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         if (arg == "--version" || arg == "-v") {
-            std::cout << "audio-engine 1.0.0 (libmpv WASAPI/Pulse Native Engine)\n";
+#ifndef AUDIO_ENGINE_VERSION
+#define AUDIO_ENGINE_VERSION "1.0.0"
+#endif
+            std::cout << "audio-engine " AUDIO_ENGINE_VERSION " (libmpv WASAPI/Pulse Native Engine)\n";
             return 0;
         }
     }

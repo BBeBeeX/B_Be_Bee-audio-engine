@@ -13,14 +13,39 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TARGET_DIR="${1:-${ROOT_DIR}/staging/mobile-mpv/ios/mpv.framework}"
 PATCH_FILE="${ROOT_DIR}/patches/mpv-pcm-tap.patch"
 
-MPV_VERSION="v0.41.0"
+# A3: same mpv override as build-android.sh (see there), and the
+# framework version follows the repo-root VERSION file instead of a
+# second hardcoded number that had already drifted to 1.2.0 vs tag 1.3.0.
+MPV_VERSION="${MPV_VERSION:-v0.41.0}"
 FFMPEG_VERSION="n6.1.1"
-FRAMEWORK_VERSION="1.2.0"
+FRAMEWORK_VERSION="${FRAMEWORK_VERSION:-$(cat "${ROOT_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]')}"
+[ -n "${FRAMEWORK_VERSION}" ] || FRAMEWORK_VERSION="1.2.0"
 LIBPLACEBO_VERSION="v6.338.2"
 LIBASS_VERSION="0.17.2"
 FREETYPE_VERSION="VER-2-13-2"
 FRIBIDI_VERSION="v1.0.14"
 HARFBUZZ_VERSION="8.3.0"
+# B1: peeled commits, same provenance as build-android.sh (see there).
+MPV_COMMIT="41f6a645068483470267271e1d09966ca3b9f413"
+FFMPEG_COMMIT="e38092ef9395d7049f871ef4d5411eb410e283e0"
+FREETYPE_COMMIT="920c5502cc3ddda88f6c7d85ee834ac611bb11cc"
+FRIBIDI_COMMIT="bca04dc3cd3af85a9d9220c430737333634d622a"
+HARFBUZZ_COMMIT="894a1f72ee93a1fd8dc1d9218cb3fd8f048be29a"
+LIBASS_COMMIT="cbb48cc4f2f076300004b8b06a86bec55281d0c2"
+LIBPLACEBO_COMMIT="64c1954570f1cd57f8570a57e51fb0249b57bb90"
+# B1: a tag is movable, so "clone --branch <tag>" alone proves nothing —
+# the checked-out HEAD must equal the pinned peeled commit, verified
+# before any of the source's code runs.
+verify_git_head() {
+  local src_dir="$1"
+  local expected="$2"
+  local head
+  head="$(git -C "${src_dir}" rev-parse HEAD)"
+  if [ "${head}" != "${expected}" ]; then
+    echo "ERROR: ${src_dir} HEAD ${head} != pinned ${expected} for its tag (tag may have moved)" >&2
+    exit 1
+  fi
+}
 
 echo "=========================================================="
 echo " BBeBee iOS Real mpv Builder"
@@ -115,6 +140,7 @@ CROSSFILE
   mkdir -p "${ffmpeg_build}"
   if [ ! -d "${WORK_DIR}/ffmpeg-src" ]; then
     git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
+    verify_git_head "${WORK_DIR}/ffmpeg-src" "${FFMPEG_COMMIT}"
   fi
   cp -r "${WORK_DIR}/ffmpeg-src"/* "${ffmpeg_build}/"
 
@@ -160,6 +186,7 @@ CROSSFILE
   mkdir -p "${freetype_build}"
   if [ ! -d "${WORK_DIR}/freetype-src" ]; then
     git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/freetype.git "${WORK_DIR}/freetype-src"
+    verify_git_head "${WORK_DIR}/freetype-src" "${FREETYPE_COMMIT}"
   fi
   cp -r "${WORK_DIR}/freetype-src"/* "${freetype_build}/"
 
@@ -185,6 +212,7 @@ CROSSFILE
   mkdir -p "${fribidi_build}"
   if [ ! -d "${WORK_DIR}/fribidi-src" ]; then
     git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fribidi.git "${WORK_DIR}/fribidi-src"
+    verify_git_head "${WORK_DIR}/fribidi-src" "${FRIBIDI_COMMIT}"
   fi
   cp -r "${WORK_DIR}/fribidi-src"/* "${fribidi_build}/"
 
@@ -207,6 +235,7 @@ CROSSFILE
   mkdir -p "${harfbuzz_build}"
   if [ ! -d "${WORK_DIR}/harfbuzz-src" ]; then
     git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/harfbuzz.git "${WORK_DIR}/harfbuzz-src"
+    verify_git_head "${WORK_DIR}/harfbuzz-src" "${HARFBUZZ_COMMIT}"
   fi
   cp -r "${WORK_DIR}/harfbuzz-src"/* "${harfbuzz_build}/"
 
@@ -239,6 +268,7 @@ CROSSFILE
   mkdir -p "${libass_build}"
   if [ ! -d "${WORK_DIR}/libass-src" ]; then
     git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
+    verify_git_head "${WORK_DIR}/libass-src" "${LIBASS_COMMIT}"
   fi
   cp -r "${WORK_DIR}/libass-src"/* "${libass_build}/"
 
@@ -266,6 +296,7 @@ CROSSFILE
   mkdir -p "${libplacebo_build}"
   if [ ! -d "${WORK_DIR}/libplacebo-src" ]; then
     git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
+    verify_git_head "${WORK_DIR}/libplacebo-src" "${LIBPLACEBO_COMMIT}"
   fi
   cp -r "${WORK_DIR}/libplacebo-src"/* "${libplacebo_build}/"
 
@@ -298,11 +329,16 @@ CROSSFILE
   mkdir -p "${mpv_build}"
   if [ ! -d "${WORK_DIR}/mpv-src" ]; then
     git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.git "${WORK_DIR}/mpv-src"
+    verify_git_head "${WORK_DIR}/mpv-src" "${MPV_COMMIT}"
     (
       cd "${WORK_DIR}/mpv-src"
-      if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" 2>/dev/null; then
+      # A5: see build-linux.sh — print the first attempt's failure
+      # before falling back to CRLF conversion, instead of swallowing it.
+      if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" > "${WORK_DIR}/patch.log" 2>&1; then
         echo "PCM tap patch applied cleanly."
       else
+        echo "First patch attempt failed (log follows); retrying with CRLF conversion..."
+        cat "${WORK_DIR}/patch.log"
         tr -d '\r' < "${PATCH_FILE}" | git apply --ignore-whitespace --ignore-space-change -
       fi
       # Remove host macOS /usr/lib and /usr/local/lib search flags that break iOS linking

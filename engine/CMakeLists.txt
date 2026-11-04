@@ -4,6 +4,19 @@ project(audio-engine LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# A3: single source of truth for the engine version. The repo-root VERSION
+# file is what release tags track; --version used to hardcode 1.0.0 while
+# tags had already moved to 1.3.0. Fall back to 1.0.0 only when the file
+# is absent (e.g. a bare engine/ checkout).
+set(AUDIO_ENGINE_VERSION "1.0.0")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" AUDIO_ENGINE_VERSION_RAW)
+    string(STRIP "${AUDIO_ENGINE_VERSION_RAW}" AUDIO_ENGINE_VERSION_RAW)
+    if(NOT AUDIO_ENGINE_VERSION_RAW STREQUAL "")
+        set(AUDIO_ENGINE_VERSION "${AUDIO_ENGINE_VERSION_RAW}")
+    endif()
+endif()
+
 if(MSVC)
     add_compile_options(/W4)
 else()
@@ -41,7 +54,11 @@ add_executable(audio-engine
     mpv_client.h
     transcode.cpp
     transcode.hpp
+    jni/transcode_caps.cpp
+    jni/transcode_caps.hpp
 )
+target_compile_definitions(audio-engine PRIVATE
+    AUDIO_ENGINE_VERSION="${AUDIO_ENGINE_VERSION}")
 
 find_package(Threads REQUIRED)
 target_link_libraries(audio-engine PRIVATE Threads::Threads)

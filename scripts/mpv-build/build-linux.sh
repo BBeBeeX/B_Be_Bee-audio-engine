@@ -2,6 +2,21 @@
 set -euo pipefail
 
 MPV_VERSION="${1:-v0.41.0}"
+# B1: peeled commit for MPV_VERSION (from `git ls-remote` refs/tags/<tag>^{}).
+# A shallow `git clone --branch <tag>` checks out the peeled commit, so
+# HEAD must equal this; a moved tag fails the build instead of silently
+# building different code. Verified before any of the source runs.
+MPV_COMMIT="41f6a645068483470267271e1d09966ca3b9f413"
+verify_git_head() {
+  local src_dir="$1"
+  local expected="$2"
+  local head
+  head="$(git -C "${src_dir}" rev-parse HEAD)"
+  if [ "${head}" != "${expected}" ]; then
+    echo "ERROR: ${src_dir} HEAD ${head} != pinned ${expected} for its tag (tag may have moved)" >&2
+    exit 1
+  fi
+}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PATCH_FILE="${ROOT_DIR}/patches/mpv-pcm-tap.patch"
@@ -23,14 +38,19 @@ trap cleanup EXIT
 
 echo "Cloning mpv repository..."
 git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.git "${WORK_DIR}/mpv-src"
+verify_git_head "${WORK_DIR}/mpv-src" "${MPV_COMMIT}"
 
 cd "${WORK_DIR}/mpv-src"
 
 echo "Applying PCM tap patch..."
-if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" 2>/dev/null; then
+# A5: the first attempt's failure output used to be swallowed by
+# 2>/dev/null, so a patch drift after an mpv bump left CI with no
+# diagnosis. Print it before falling back to CRLF conversion.
+if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" > "${WORK_DIR}/patch.log" 2>&1; then
     echo "Patch applied cleanly."
 else
-    echo "Applying patch with CRLF conversion..."
+    echo "First patch attempt failed (log follows); retrying with CRLF conversion..."
+    cat "${WORK_DIR}/patch.log"
     tr -d '\r' < "${PATCH_FILE}" | git apply --ignore-whitespace --ignore-space-change -
 fi
 
@@ -93,7 +113,11 @@ if command -v patchelf >/dev/null 2>&1; then
     done < <(find "${TARGET_DIR}" -maxdepth 1 -type f -name '*.so*' -print0)
     echo "Patched rpath on ${patched} libraries."
 else
-    echo "WARNING: patchelf not found - staged libmpv closure will NOT load on machines without system ffmpeg (install patchelf: sudo apt-get install patchelf)." >&2
+    # A4: this used to be a warning followed by a "successfully generated"
+    # message, shipping a closure that cannot load on machines without a
+    # system ffmpeg. CI installs patchelf; without it the build fails.
+    echo "ERROR: patchelf not found - staged libmpv closure would NOT load on machines without system ffmpeg (install patchelf: sudo apt-get install patchelf)." >&2
+    exit 1
 fi
 
 echo "=== Patched libmpv successfully generated for Linux ==="

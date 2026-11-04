@@ -59,18 +59,30 @@ jobs:
           mkdir -p build/bin
           cp build/engine/audio-engine build/bin/
 
+      - name: Run engine tests
+        run: |
+          ctest --test-dir build/engine --output-on-failure
+
       - name: Package Full and Slim Archives
         run: |
           mkdir -p staging/full staging/slim dist
-          
+
+          # A1: a missing libmpv must fail the job, not ship an
+          # engine-only archive labelled "full". The `|| true` that used
+          # to sit on these copies hid exactly that failure mode.
+          if ! ls build/libmpv/linux/libmpv.so* >/dev/null 2>&1; then
+            echo "ERROR: no libmpv built for Linux — refusing to package" >&2
+            exit 1
+          fi
+
           # Full package (engine + libmpv + transitive dependencies)
           cp build/bin/audio-engine staging/full/
-          cp -P build/libmpv/linux/* staging/full/ || true
+          cp -P build/libmpv/linux/* staging/full/
           tar -czf dist/audio-engine-linux-x64.tar.gz -C staging/full .
 
           # Slim package (engine + libmpv only)
           cp build/bin/audio-engine staging/slim/
-          cp -P build/libmpv/linux/libmpv.so* staging/slim/ || true
+          cp -P build/libmpv/linux/libmpv.so* staging/slim/
           tar -czf dist/audio-engine-linux-x64-slim.tar.gz -C staging/slim .
 
           cd dist && sha256sum *.tar.gz > sha256-linux.txt
@@ -106,16 +118,28 @@ jobs:
           mkdir -p build/bin
           cp build/engine/audio-engine build/bin/
 
+      - name: Run engine tests
+        run: |
+          ctest --test-dir build/engine --output-on-failure
+
       - name: Package macOS Archive
         run: |
           mkdir -p staging/full dist
 
+          # A1: same rule as Linux — a missing libmpv fails the job.
+          if ! ls build/libmpv/darwin/libmpv*.dylib* >/dev/null 2>&1; then
+            echo "ERROR: no libmpv built for macOS — refusing to package" >&2
+            exit 1
+          fi
+
           # Full package
           cp build/bin/audio-engine staging/full/
-          cp -P build/libmpv/darwin/* staging/full/ || true
+          cp -P build/libmpv/darwin/* staging/full/
           tar -czf dist/audio-engine-macos-arm64.tar.gz -C staging/full .
 
       - name: Build Genuine iOS mpv.framework
+        env:
+          MPV_VERSION: ${{ github.event.inputs.mpv_version || 'v0.41.0' }}
         run: |
           bash scripts/mpv-build/build-ios.sh staging/mobile-mpv/ios/mpv.framework
 
@@ -179,14 +203,20 @@ jobs:
         run: |
           mkdir -p staging/full staging/slim dist
 
+          # A1: same rule as Linux/macOS — a missing libmpv fails the job.
+          if [ ! -f build/libmpv/win64/libmpv-2.dll ]; then
+            echo "ERROR: no libmpv-2.dll built for Windows — refusing to package" >&2
+            exit 1
+          fi
+
           # Full package
           cp build/bin/audio-engine.exe staging/full/
-          cp -r build/libmpv/win64/* staging/full/ || true
+          cp -r build/libmpv/win64/* staging/full/
           (cd staging/full && zip -r ../../dist/audio-engine-windows-x64.zip .)
 
           # Slim package
           cp build/bin/audio-engine.exe staging/slim/
-          cp build/libmpv/win64/libmpv-2.dll staging/slim/ || true
+          cp build/libmpv/win64/libmpv-2.dll staging/slim/
           (cd staging/slim && zip -r ../../dist/audio-engine-windows-x64-slim.zip .)
 
           cd dist && sha256sum *.zip > sha256-win32.txt
@@ -225,6 +255,7 @@ jobs:
       - name: Build Genuine libmpv + FFmpeg SDK for Android ABIs
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          MPV_VERSION: ${{ github.event.inputs.mpv_version || 'v0.41.0' }}
         run: |
           for ABI in arm64-v8a x86_64; do
             echo "=== Compiling Genuine libmpv + FFmpeg SDK for ${ABI} ==="

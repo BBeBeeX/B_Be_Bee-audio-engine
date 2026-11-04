@@ -1,13 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "name": "BBeBee-audio-engine-third-party-manifest",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Exhaustive metadata and verification specification for third-party dynamic libraries across supported platforms",
   "policy": {
     "noBinaryInGit": true,
     "distributionMode": "github-releases",
-    "releaseTag": "v1.2.0",
-    "hashAlgorithms": ["sha256", "md5"]
+    "releaseTag": "v1.3.0",
+    "hashAlgorithms": ["sha256"]
   },
   "platforms": {
     "darwin-arm64": {
@@ -24,7 +24,6 @@
         {
           "name": "libmpv.2.dylib",
           "role": "Patched mpv audio playback core with PCM tap callback",
-          "md5": "89e1859c95a988fdf47bb29da75ec660",
           "rpath": "@loader_path;@executable_path"
         },
         {
@@ -66,13 +65,11 @@
         {
           "name": "libmpv.so.2",
           "role": "Patched mpv core shared object with PCM tap callback hook",
-          "md5": "dc746ce206c812a5bd84ac96531e7707",
           "rpath": "$ORIGIN"
         },
         {
           "name": "libasound.so.2",
           "role": "ALSA audio output infrastructure",
-          "md5": "6aeaba120dd68c9f0eed26cf3ee947b4",
           "rpath": "$ORIGIN"
         },
         {
@@ -121,13 +118,11 @@
       "keyLibraries": [
         {
           "name": "libmpv-2.dll",
-          "role": "Patched mpv dynamic library with PCM tap hook (WASAPI output)",
-          "md5": "6e18221ba07c050aeaa757c39708369a"
+          "role": "Patched mpv dynamic library with PCM tap hook (WASAPI output)"
         },
         {
           "name": "zlib1.dll",
-          "role": "Decompression library",
-          "md5": "30a31b969a3356efde11078dc635baa0"
+          "role": "Decompression library"
         },
         {
           "name": "avcodec-63.dll",
@@ -158,14 +153,14 @@
         },
         {
           "name": "libmpv.so",
-          "role": "Genuine libmpv audio playback core compiled from source using Android NDK r26b (AudioTrack / AAudio / OpenSL ES backends with PCM tap callback)"
+          "role": "Genuine libmpv audio playback core compiled from source using Android NDK r26b (AudioTrack / OpenSL ES backends with PCM tap callback)"
         }
       ]
     },
     "ios": {
       "architectures": ["arm64", "x86_64"],
       "os": "ios",
-      "minimumDeploymentTarget": "15.0",
+      "minimumDeploymentTarget": "16.0",
       "packages": {
         "xcframework": {
           "archive": "audio-engine-ios.xcframework.zip"

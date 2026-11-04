@@ -3,8 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-MAIN_REPO="${MAIN_REPO:-/home/revers/project/B_Be_Bee}"
-LIBMPV_ROOT="${MAIN_REPO}/apps/desktop/resources/libmpv"
+# A6: the old default pointed at one developer's checkout
+# (/home/revers/project/B_Be_Bee) and silently reused whatever staging
+# directory happened to exist. Both are now opt-in: set MAIN_REPO to
+# the BBeBee checkout that holds apps/desktop/resources/libmpv, or set
+# REUSE_STAGING=1 to knowingly reuse an existing staging directory
+# (and its already-built binaries) instead of rebuilding from it.
+MAIN_REPO="${MAIN_REPO:-}"
+if [ -n "${MAIN_REPO}" ]; then
+  LIBMPV_ROOT="${MAIN_REPO}/apps/desktop/resources/libmpv"
+else
+  LIBMPV_ROOT=""
+fi
 DIST_DIR="${ROOT_DIR}/dist"
 STAGING_DIR="${ROOT_DIR}/staging"
 
@@ -18,14 +28,13 @@ echo "Dist:        ${DIST_DIR}"
 echo "Staging:     ${STAGING_DIR}"
 echo "=========================================================="
 
-USE_EXISTING_STAGING=0
-if [ -d "${LIBMPV_ROOT}" ]; then
+USE_EXISTING_STAGING="${REUSE_STAGING:-0}"
+if [ -n "${LIBMPV_ROOT}" ] && [ -d "${LIBMPV_ROOT}" ]; then
   echo "Found libmpv resources directory at: ${LIBMPV_ROOT}"
-elif [ -d "${STAGING_DIR}/linux-full" ] && [ -d "${STAGING_DIR}/macos-full" ] && [ -d "${STAGING_DIR}/windows-full" ]; then
-  echo "Notice: LIBMPV_ROOT not found, reusing existing staging libraries from: ${STAGING_DIR}"
-  USE_EXISTING_STAGING=1
+elif [ "${USE_EXISTING_STAGING}" -eq 1 ] && [ -d "${STAGING_DIR}/linux-full" ] && [ -d "${STAGING_DIR}/macos-full" ] && [ -d "${STAGING_DIR}/windows-full" ]; then
+  echo "Notice: LIBMPV_ROOT not found, reusing existing staging libraries from: ${STAGING_DIR} (REUSE_STAGING=1 — stale binaries are your responsibility)"
 else
-  echo "Error: Neither LIBMPV_ROOT nor existing staging directories found."
+  echo "Error: Neither LIBMPV_ROOT nor existing staging directories found. Set MAIN_REPO to a BBeBee checkout, or REUSE_STAGING=1 to reuse existing staging." >&2
   exit 1
 fi
 

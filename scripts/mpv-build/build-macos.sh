@@ -2,6 +2,18 @@
 set -euo pipefail
 
 MPV_VERSION="${1:-v0.41.0}"
+# B1: peeled commit for MPV_VERSION, same provenance and rule as build-linux.sh.
+MPV_COMMIT="41f6a645068483470267271e1d09966ca3b9f413"
+verify_git_head() {
+  local src_dir="$1"
+  local expected="$2"
+  local head
+  head="$(git -C "${src_dir}" rev-parse HEAD)"
+  if [ "${head}" != "${expected}" ]; then
+    echo "ERROR: ${src_dir} HEAD ${head} != pinned ${expected} for its tag (tag may have moved)" >&2
+    exit 1
+  fi
+}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PATCH_FILE="${ROOT_DIR}/patches/mpv-pcm-tap.patch"
@@ -23,14 +35,18 @@ trap cleanup EXIT
 
 echo "Cloning mpv repository..."
 git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.git "${WORK_DIR}/mpv-src"
+verify_git_head "${WORK_DIR}/mpv-src" "${MPV_COMMIT}"
 
 cd "${WORK_DIR}/mpv-src"
 
 echo "Applying PCM tap patch..."
-if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" 2>/dev/null; then
+# A5: see build-linux.sh — print the first attempt's failure before
+# falling back to CRLF conversion, instead of swallowing it.
+if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" > "${WORK_DIR}/patch.log" 2>&1; then
     echo "Patch applied cleanly."
 else
-    echo "Applying patch with CRLF conversion..."
+    echo "First patch attempt failed (log follows); retrying with CRLF conversion..."
+    cat "${WORK_DIR}/patch.log"
     tr -d '\r' < "${PATCH_FILE}" | git apply --ignore-whitespace --ignore-space-change -
 fi
 
@@ -138,7 +154,13 @@ bundle_macos_deps() {
         if [ -f "$f" ] && [ ! -L "$f" ]; then
             install_name_tool -add_rpath "@loader_path" "$f" 2>/dev/null || true
             install_name_tool -add_rpath "@executable_path" "$f" 2>/dev/null || true
-            codesign --force --deep --sign - "$f" 2>/dev/null || true
+            # A4: a failed ad-hoc sign used to be swallowed by `|| true`
+            # while the script still reported success. Verify the result
+            # and fail instead of shipping an unsigned/unsignable dylib.
+            if ! codesign --force --deep --sign - "$f" 2>/dev/null; then
+                echo "ERROR: codesign failed for ${f}" >&2
+                return 1
+            fi
         fi
     done
     echo "=== macOS dependency bundling complete ==="

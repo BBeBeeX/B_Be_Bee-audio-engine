@@ -14,7 +14,11 @@ TARGET_DIR="${2:-${ROOT_DIR}/build/libmpv/android/${ABI}}"
 PATCH_FILE="${ROOT_DIR}/patches/mpv-pcm-tap.patch"
 
 # Pinned Dependency Versions & Sources
-MPV_VERSION="v0.41.0"
+# A3: mpv is overridable via the environment so a workflow_dispatch
+# mpv_version actually reaches the mobile builds too — previously the
+# dispatch input only affected the desktop scripts while Android/iOS
+# silently kept building v0.41.0, producing mixed-version releases.
+MPV_VERSION="${MPV_VERSION:-v0.41.0}"
 FFMPEG_VERSION="n6.1.1"
 LIBPLACEBO_VERSION="v6.338.2"
 LIBASS_VERSION="0.17.2"
@@ -42,6 +46,17 @@ LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
 LIBOGG_COMMIT="e1774cd77f471443541596e09078e78fdc342e4f"
 LIBVORBIS_COMMIT="0657aee69dec8508a0011f47f3b69d7538e9d262"
 LIBOPUS_COMMIT="82ac57d9f1aaf575800cf17373348e45b7ce6c0d"
+# B1: peeled commits for the remaining git deps, same provenance as the
+# xiph pins above (git ls-remote <repo> refs/tags/<tag>^{}).
+# libplacebo's HEAD pin covers the main repo only; its submodules are
+# shallow clones and are not pinned here (residual, see audit report).
+MPV_COMMIT="41f6a645068483470267271e1d09966ca3b9f413"
+FFMPEG_COMMIT="e38092ef9395d7049f871ef4d5411eb410e283e0"
+FREETYPE_COMMIT="920c5502cc3ddda88f6c7d85ee834ac611bb11cc"
+FRIBIDI_COMMIT="bca04dc3cd3af85a9d9220c430737333634d622a"
+HARFBUZZ_COMMIT="894a1f72ee93a1fd8dc1d9218cb3fd8f048be29a"
+LIBASS_COMMIT="cbb48cc4f2f076300004b8b06a86bec55281d0c2"
+LIBPLACEBO_COMMIT="64c1954570f1cd57f8570a57e51fb0249b57bb90"
 
 echo "=========================================================="
 echo " BBeBee Android Real libmpv Builder"
@@ -322,6 +337,7 @@ bootstrap_autotools "${WORK_DIR}/opus-src"
 echo "=== [5/10] Building FFmpeg (${FFMPEG_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/ffmpeg-src"
 git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
+verify_git_head "${WORK_DIR}/ffmpeg-src" "${FFMPEG_COMMIT}"
 
 # arm64-v8a must build FFmpeg with --disable-asm. This is NOT fixed by
 # the --enable-pic / -fPIC already passed below: FFmpeg n6.1.1's
@@ -400,6 +416,7 @@ for mux in ${TRANSCODE_MUXERS}; do MUXER_FLAGS="${MUXER_FLAGS} --enable-muxer=${
 echo "=== [6/10] Building FreeType (${FREETYPE_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/freetype-src"
 git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/freetype.git "${WORK_DIR}/freetype-src"
+verify_git_head "${WORK_DIR}/freetype-src" "${FREETYPE_COMMIT}"
 (
   cd "${WORK_DIR}/freetype-src"
   meson setup build \
@@ -420,6 +437,7 @@ git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/f
 echo "=== [7/10] Building FriBidi (${FRIBIDI_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/fribidi-src"
 git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fribidi.git "${WORK_DIR}/fribidi-src"
+verify_git_head "${WORK_DIR}/fribidi-src" "${FRIBIDI_COMMIT}"
 
 (
   cd "${WORK_DIR}/fribidi-src"
@@ -438,6 +456,7 @@ git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fri
 echo "=== [8/10] Building HarfBuzz (${HARFBUZZ_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/harfbuzz-src"
 git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/harfbuzz.git "${WORK_DIR}/harfbuzz-src"
+verify_git_head "${WORK_DIR}/harfbuzz-src" "${HARFBUZZ_COMMIT}"
 
 (
   cd "${WORK_DIR}/harfbuzz-src"
@@ -466,6 +485,7 @@ git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/h
 echo "=== [9/10] Building libass (${LIBASS_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/libass-src"
 git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
+verify_git_head "${WORK_DIR}/libass-src" "${LIBASS_COMMIT}"
 (
   cd "${WORK_DIR}/libass-src"
   meson setup build \
@@ -488,6 +508,7 @@ git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libas
 echo "=== [10/10] Building libplacebo (${LIBPLACEBO_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/libplacebo-src"
 git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
+verify_git_head "${WORK_DIR}/libplacebo-src" "${LIBPLACEBO_COMMIT}"
 
 (
   cd "${WORK_DIR}/libplacebo-src"
@@ -516,13 +537,18 @@ git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${LIBPLA
 echo "=== Building Patched libmpv (${MPV_VERSION}) for Android ${ABI} ==="
 mkdir -p "${WORK_DIR}/mpv-src"
 git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.git "${WORK_DIR}/mpv-src"
+verify_git_head "${WORK_DIR}/mpv-src" "${MPV_COMMIT}"
 
 (
   cd "${WORK_DIR}/mpv-src"
   echo "Applying PCM tap patch..."
-  if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" 2>/dev/null; then
+  # A5: see build-linux.sh — print the first attempt's failure before
+  # falling back to CRLF conversion, instead of swallowing it.
+  if git apply --ignore-whitespace --ignore-space-change "${PATCH_FILE}" > "${WORK_DIR}/patch.log" 2>&1; then
     echo "PCM tap patch applied cleanly."
   else
+    echo "First patch attempt failed (log follows); retrying with CRLF conversion..."
+    cat "${WORK_DIR}/patch.log"
     tr -d '\r' < "${PATCH_FILE}" | git apply --ignore-whitespace --ignore-space-change -
     echo "PCM tap patch applied with CRLF normalization."
   fi
