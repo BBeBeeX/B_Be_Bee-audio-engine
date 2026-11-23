@@ -68,6 +68,7 @@ static std::string getExecutableDir() {
 #include "mpv_client.h"
 #include "jni/transcode_caps.hpp"
 #include "pcm_ring_buffer.hpp"
+#include "pcm_broadcaster.hpp"
 #include "fft.hpp"
 #include "json.hpp"
 #include "transcode.hpp"
@@ -382,9 +383,11 @@ public:
         // silence — the renderer's visualizer must know, so it can fall back
         // to the Web Audio analyser instead of polling zero frames forever.
         ready["pcmTapAvailable"] = mpvLib.set_pcm_callback != nullptr;
+        ready["broadcastSupported"] = true;
         ready["sampleRate"] = sampleRate;
         ready["channels"] = channels;
         ready["bitDepth"] = bitDepth;
+        pcmBroadcaster.configureFormat(sampleRate, channels);
         sendJson(ready);
     }
 
@@ -473,6 +476,7 @@ public:
         endedDispatched = false;
         status = "loading";
         pcmRingBuffer.clear();
+        pcmBroadcaster.clearBuffer();
         {
             std::lock_guard<std::mutex> fLock(fftMutex);
             fftProcessor.reset();
@@ -533,6 +537,7 @@ public:
         if (atMs >= 0) {
             positionMs = atMs;
             pcmRingBuffer.clear();
+            pcmBroadcaster.clearBuffer();
             {
                 std::lock_guard<std::mutex> fLock(fftMutex);
                 fftProcessor.reset();
@@ -570,6 +575,7 @@ public:
         positionMs = 0;
         endedDispatched = false;
         pcmRingBuffer.clear();
+        pcmBroadcaster.clearBuffer();
         {
             std::lock_guard<std::mutex> fLock(fftMutex);
             fftProcessor.reset();
@@ -586,6 +592,7 @@ public:
         positionMs = std::max(0, durationMs > 0 ? std::min(atMs, durationMs) : atMs);
         endedDispatched = false;
         pcmRingBuffer.clear();
+        pcmBroadcaster.clearBuffer();
         {
             std::lock_guard<std::mutex> fLock(fftMutex);
             fftProcessor.reset();
@@ -736,6 +743,16 @@ public:
         }
     }
 
+    void setBroadcast(bool enabled, const std::string& host, int port) {
+        const bool ok = pcmBroadcaster.setTarget(enabled, host, port);
+        JsonValue resp = JsonValue::object();
+        resp["type"] = "broadcast-state";
+        resp["enabled"] = enabled && ok;
+        resp["port"] = (enabled && ok) ? port : 0;
+        resp["ok"] = ok;
+        sendJson(resp);
+    }
+
     void shutdown() {
         if (!running.exchange(false)) {
             return;
@@ -772,7 +789,8 @@ public:
             mpvLib.command(mpv, stopCmd);
         }
 
-        // 3. Clear ring buffer
+        // 3. Stop PCM broadcaster and clear ring buffers
+        pcmBroadcaster.stop();
         pcmRingBuffer.clear();
 
         // 4. Join all worker threads
@@ -805,6 +823,8 @@ public:
         resp["uri"] = currentUri;
         resp["mpvAvailable"] = mpv != nullptr;
         resp["pcmTapAvailable"] = mpvLib.set_pcm_callback != nullptr;
+        resp["broadcastSupported"] = true;
+        resp["broadcastActive"] = pcmBroadcaster.isActive();
         sendJson(resp);
     }
 
@@ -988,6 +1008,7 @@ private:
     bool visualizerWasPlaying = false;
     FftProcessor fftProcessor;
     PcmRingBuffer pcmRingBuffer;
+    PcmBroadcaster pcmBroadcaster;
     JsonValue dspConfig;
     bool streamPlaying = false;
     bool endedDispatched = false;
@@ -996,6 +1017,7 @@ private:
         if (userdata && data && frames > 0) {
             auto* app = static_cast<AudioEngineApp*>(userdata);
             app->pcmRingBuffer.write(data, static_cast<size_t>(frames), channels, sample_rate);
+            app->pcmBroadcaster.pushPcm(data, static_cast<size_t>(frames), channels, sample_rate);
         }
     }
 
@@ -1199,6 +1221,7 @@ private:
 
                     endedDispatched = false;
                     pcmRingBuffer.configure(sampleRate, channels, 65536);
+                    pcmBroadcaster.configureFormat(sampleRate, channels);
                     {
                         std::lock_guard<std::mutex> fLock(fftMutex);
                         fftProcessor.reset();
@@ -1245,6 +1268,7 @@ private:
                                 status = "ended";
                                 positionMs = durationMs;
                                 pcmRingBuffer.clear();
+                                pcmBroadcaster.clearBuffer();
                                 {
                                     std::lock_guard<std::mutex> fLock(fftMutex);
                                     fftProcessor.reset();
@@ -1264,6 +1288,7 @@ private:
                         if (sr > 0 && static_cast<int>(sr) != sampleRate) {
                             sampleRate = static_cast<int>(sr);
                             pcmRingBuffer.configure(sampleRate, channels, 65536);
+                            pcmBroadcaster.configureFormat(sampleRate, channels);
                         }
                     } else if (propName == "audio-out-params/channel-count" && prop->format == MPV_FORMAT_INT64) {
                         int64_t ch = *reinterpret_cast<int64_t*>(prop->data);
@@ -1271,6 +1296,7 @@ private:
                         if (ch > 0 && static_cast<int>(ch) != channels) {
                             channels = static_cast<int>(ch);
                             pcmRingBuffer.configure(sampleRate, channels, 65536);
+                            pcmBroadcaster.configureFormat(sampleRate, channels);
                         }
                     }
                     break;
@@ -1279,6 +1305,7 @@ private:
                     auto* end = reinterpret_cast<mpv_event_end_file*>(event->data);
                     std::lock_guard<std::mutex> lock(engineMutex);
                     pcmRingBuffer.clear();
+                    pcmBroadcaster.clearBuffer();
                     {
                         std::lock_guard<std::mutex> fLock(fftMutex);
                         fftProcessor.reset();
@@ -1568,6 +1595,11 @@ int main(int argc, char* argv[]) {
             app.setDspConfig(cmd.get("config"));
         } else if (action == "setVisualizer") {
             app.setVisualizer(cmd.get("enabled").asBool(true), cmd.get("fftSize").asInt(128));
+        } else if (action == "setBroadcast") {
+            app.setBroadcast(
+                cmd.get("enabled").asBool(false),
+                cmd.get("host").asString("127.0.0.1"),
+                cmd.get("port").asInt(0));
         } else if (action == "getRingBufferStats") {
             app.getRingBufferStats();
         } else if (action == "getState") {

@@ -49,6 +49,8 @@ add_executable(audio-engine
     main.cpp
     pcm_ring_buffer.cpp
     pcm_ring_buffer.hpp
+    pcm_broadcaster.cpp
+    pcm_broadcaster.hpp
     fft.hpp
     json.hpp
     mpv_client.h
@@ -69,6 +71,9 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(audio-engine PRIVATE Threads::Threads)
+if(WIN32)
+    target_link_libraries(audio-engine PRIVATE ws2_32)
+endif()
 if(HAVE_LIBAV)
     target_compile_definitions(audio-engine PRIVATE HAVE_LIBAV)
     if(TARGET PkgConfig::LIBAV)
@@ -141,3 +146,17 @@ if(APPLE)
     )
 endif()
 add_test(NAME audio-engine-transcode-tests COMMAND audio-engine-transcode-tests)
+
+# Post-DSP LAN PCM broadcast tap tests (BBPC header, s16le conversion, loopback TCP).
+add_executable(audio-engine-broadcast-tests
+    tests/test_pcm_broadcaster.cpp
+    pcm_broadcaster.cpp
+    pcm_broadcaster.hpp
+    pcm_ring_buffer.cpp
+    pcm_ring_buffer.hpp
+)
+target_link_libraries(audio-engine-broadcast-tests PRIVATE Threads::Threads)
+if(WIN32)
+    target_link_libraries(audio-engine-broadcast-tests PRIVATE ws2_32)
+endif()
+add_test(NAME audio-engine-broadcast-tests COMMAND audio-engine-broadcast-tests)
