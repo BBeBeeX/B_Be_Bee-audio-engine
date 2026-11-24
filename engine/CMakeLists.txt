@@ -33,17 +33,85 @@ set(HAVE_LIBAV OFF)
 set(LIBAV_INCLUDE_DIRS "")
 set(LIBAV_LIBRARIES "")
 set(LIBAV_LIBRARY_DIRS "")
+set(LIBAV_PC_INCLUDEDIR "")
+set(LIBAV_PC_LIBDIR "")
+set(LIBAV_RESOLVED_LIB_DIR "")
 if(PkgConfig_FOUND)
+    if(APPLE)
+        # Keep Homebrew's pkgconf from stripping /opt/homebrew/{include,lib}
+        # when configured with system-dir defaults.
+        set(ENV{PKG_CONFIG_ALLOW_SYSTEM_CFLAGS} "1")
+        set(ENV{PKG_CONFIG_ALLOW_SYSTEM_LIBS} "1")
+    endif()
     pkg_check_modules(LIBAV QUIET IMPORTED_TARGET libavformat libavcodec libavutil libswresample)
     if(LIBAV_FOUND)
-        set(HAVE_LIBAV ON)
+        if(APPLE)
+            pkg_get_variable(LIBAV_PC_INCLUDEDIR libavformat includedir)
+            pkg_get_variable(LIBAV_PC_LIBDIR libavformat libdir)
+            find_path(LIBAV_RESOLVED_INCLUDE_DIR
+                NAMES libavformat/avformat.h
+                HINTS
+                    ${LIBAV_INCLUDE_DIRS}
+                    ${LIBAV_PC_INCLUDEDIR}
+                    /opt/homebrew/opt/ffmpeg/include
+                    /opt/homebrew/include
+                    /usr/local/opt/ffmpeg/include
+                    /usr/local/include
+            )
+            find_library(LIBAV_RESOLVED_AVFORMAT_LIB
+                NAMES avformat
+                HINTS
+                    ${LIBAV_LIBRARY_DIRS}
+                    ${LIBAV_PC_LIBDIR}
+                    /opt/homebrew/opt/ffmpeg/lib
+                    /opt/homebrew/lib
+                    /usr/local/opt/ffmpeg/lib
+                    /usr/local/lib
+            )
+            if(LIBAV_RESOLVED_AVFORMAT_LIB)
+                get_filename_component(LIBAV_RESOLVED_LIB_DIR "${LIBAV_RESOLVED_AVFORMAT_LIB}" DIRECTORY)
+            endif()
+            if(LIBAV_RESOLVED_INCLUDE_DIR)
+                set(HAVE_LIBAV ON)
+            else()
+                message(WARNING "FFmpeg pkg-config matched libav*, but libavformat/avformat.h was not found; disabling HAVE_LIBAV")
+            endif()
+        else()
+            set(HAVE_LIBAV ON)
+        endif()
     endif()
 endif()
 if(HAVE_LIBAV)
-    message(STATUS "FFmpeg (libav*) found: transcode action enabled")
+    if(LIBAV_RESOLVED_INCLUDE_DIR)
+        message(STATUS "FFmpeg (libav*) found: transcode action enabled (include: ${LIBAV_RESOLVED_INCLUDE_DIR})")
+    else()
+        message(STATUS "FFmpeg (libav*) found: transcode action enabled")
+    endif()
 else()
     message(STATUS "FFmpeg (libav*) NOT found: transcode action will report unsupported at runtime")
 endif()
+
+function(audio_engine_link_libav target_name)
+    if(HAVE_LIBAV)
+        target_compile_definitions(${target_name} PRIVATE HAVE_LIBAV)
+        if(TARGET PkgConfig::LIBAV)
+            target_link_libraries(${target_name} PRIVATE PkgConfig::LIBAV)
+        else()
+            target_include_directories(${target_name} PRIVATE ${LIBAV_INCLUDE_DIRS})
+            target_link_directories(${target_name} PRIVATE ${LIBAV_LIBRARY_DIRS})
+            target_link_libraries(${target_name} PRIVATE ${LIBAV_LIBRARIES})
+        endif()
+        if(APPLE)
+            target_include_directories(${target_name} SYSTEM PRIVATE
+                ${LIBAV_RESOLVED_INCLUDE_DIR} ${LIBAV_INCLUDE_DIRS})
+            if(LIBAV_RESOLVED_LIB_DIR)
+                target_link_directories(${target_name} PRIVATE "${LIBAV_RESOLVED_LIB_DIR}")
+            elseif(LIBAV_PC_LIBDIR)
+                target_link_directories(${target_name} PRIVATE "${LIBAV_PC_LIBDIR}")
+            endif()
+        endif()
+    endif()
+endfunction()
 
 add_executable(audio-engine
     main.cpp
@@ -74,16 +142,7 @@ target_link_libraries(audio-engine PRIVATE Threads::Threads)
 if(WIN32)
     target_link_libraries(audio-engine PRIVATE ws2_32)
 endif()
-if(HAVE_LIBAV)
-    target_compile_definitions(audio-engine PRIVATE HAVE_LIBAV)
-    if(TARGET PkgConfig::LIBAV)
-        target_link_libraries(audio-engine PRIVATE PkgConfig::LIBAV)
-    else()
-        target_include_directories(audio-engine PRIVATE ${LIBAV_INCLUDE_DIRS})
-        target_link_directories(audio-engine PRIVATE ${LIBAV_LIBRARY_DIRS})
-        target_link_libraries(audio-engine PRIVATE ${LIBAV_LIBRARIES})
-    endif()
-endif()
+audio_engine_link_libav(audio-engine)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(audio-engine PRIVATE ${CMAKE_DL_LIBS})
@@ -126,16 +185,7 @@ add_executable(audio-engine-transcode-tests
     transcode.hpp
 )
 target_link_libraries(audio-engine-transcode-tests PRIVATE Threads::Threads)
-if(HAVE_LIBAV)
-    target_compile_definitions(audio-engine-transcode-tests PRIVATE HAVE_LIBAV)
-    if(TARGET PkgConfig::LIBAV)
-        target_link_libraries(audio-engine-transcode-tests PRIVATE PkgConfig::LIBAV)
-    else()
-        target_include_directories(audio-engine-transcode-tests PRIVATE ${LIBAV_INCLUDE_DIRS})
-        target_link_directories(audio-engine-transcode-tests PRIVATE ${LIBAV_LIBRARY_DIRS})
-        target_link_libraries(audio-engine-transcode-tests PRIVATE ${LIBAV_LIBRARIES})
-    endif()
-endif()
+audio_engine_link_libav(audio-engine-transcode-tests)
 if(UNIX)
     target_link_libraries(audio-engine-transcode-tests PRIVATE ${CMAKE_DL_LIBS})
 endif()
