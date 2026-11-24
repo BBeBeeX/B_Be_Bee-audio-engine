@@ -68,6 +68,8 @@ meson setup build \
     -Duchardet=disabled \
     -Dlibavdevice=disabled \
     -Dvulkan=disabled \
+    -Dvaapi=disabled \
+    -Dvdpau=disabled \
     -Dshaderc=disabled \
     -Dspirv-cross=disabled \
     -Dsdl2-video=disabled \

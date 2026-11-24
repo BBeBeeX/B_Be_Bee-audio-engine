@@ -56,8 +56,10 @@ fi
 
 echo "Configuring build with Meson..."
 # Disable non-audio / unused mpv features to speed up Windows builds and shrink
-# the bundled DLL closure. Keep gl/Direct3D/win32 untouched because mpv v0.41.0
-# links dangling ra_is_gl references when gl=disabled.
+# the bundled DLL closure. Keep gl/d3d11/shaderc/spirv-cross/win32 untouched:
+# disabling shaderc/spirv-cross turns off d3d11, which leaves
+# HAVE_DXGI_DEBUG_D3D11 undefined in config.h and breaks d3d11_helpers.h, and
+# gl=disabled hits dangling ra_is_gl references in mpv v0.41.0.
 meson setup build \
     --buildtype=release \
     -Ddefault_library=shared \
@@ -69,8 +71,8 @@ meson setup build \
     -Duchardet=disabled \
     -Dlibavdevice=disabled \
     -Dvulkan=disabled \
-    -Dshaderc=disabled \
-    -Dspirv-cross=disabled \
+    -Dvaapi=disabled \
+    -Dvdpau=disabled \
     -Dsdl2-video=disabled \
     -Dsdl2-audio=disabled \
     -Djack=disabled \
