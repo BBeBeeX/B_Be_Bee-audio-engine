@@ -3,10 +3,17 @@
 // Run: /tmp/test_fft_stereo
 // No libmpv, no test framework: plain asserts, exit code is the verdict.
 #include "../fft.hpp"
-#include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
+
+#define REQUIRE(cond) do { \
+    if (!(cond)) { \
+        std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+        std::exit(1); \
+    } \
+} while (0)
 
 using namespace audio_engine;
 
@@ -35,26 +42,26 @@ int main() {
             pcm[static_cast<size_t>(i) * 2 + 1] = 0.0f;
         }
         fft.processInterleaved(pcm.data(), N, 2);
-        assert(fft.getChannels() == 2);
-        assert(fft.hasStereo());
-        assert(fft.getSampleRateHz() == 48000);
+        REQUIRE(fft.getChannels() == 2);
+        REQUIRE(fft.hasStereo());
+        REQUIRE(fft.getSampleRateHz() == 48000);
         const int leftPeak = argmax(fft.getLeftFrequencyData());
-        assert(leftPeak >= 2 && leftPeak <= 4);
-        assert(fft.getLeftFrequencyData()[static_cast<size_t>(leftPeak)] > 100);
+        REQUIRE(leftPeak >= 2 && leftPeak <= 4);
+        REQUIRE(fft.getLeftFrequencyData()[static_cast<size_t>(leftPeak)] > 100);
         // Right is silence: every bin at the floor.
-        for (uint8_t v : fft.getRightFrequencyData()) assert(v == 0);
+        for (uint8_t v : fft.getRightFrequencyData()) REQUIRE(v == 0);
         // Mono mix is half amplitude (0.25 sine): still peaks at the same bin, lower.
         const int monoPeak = argmax(fft.getFrequencyData());
-        assert(monoPeak == leftPeak);
-        assert(fft.getFrequencyData()[static_cast<size_t>(monoPeak)] > 50);
-        assert(fft.getFrequencyData()[static_cast<size_t>(monoPeak)] <
-               fft.getLeftFrequencyData()[static_cast<size_t>(leftPeak)]);
+        REQUIRE(monoPeak == leftPeak);
+        REQUIRE(fft.getFrequencyData()[static_cast<size_t>(monoPeak)] > 50);
+        REQUIRE(fft.getFrequencyData()[static_cast<size_t>(monoPeak)] <
+                fft.getLeftFrequencyData()[static_cast<size_t>(leftPeak)]);
         // Time domain: left follows the sine, right sits at the
         // zero-sample value 127 (truncated (0+1)*127.5; 128 is only
         // the beyond-take fill, not a zero sample).
-        assert(fft.getLeftTimeDomainData()[0] == 127); // sin(0) = 0
-        assert(fft.getLeftTimeDomainData()[12] > 128);
-        for (uint8_t v : fft.getRightTimeDomainData()) assert(v == 127);
+        REQUIRE(fft.getLeftTimeDomainData()[0] == 127); // sin(0) = 0
+        REQUIRE(fft.getLeftTimeDomainData()[12] > 128);
+        for (uint8_t v : fft.getRightTimeDomainData()) REQUIRE(v == 127);
         std::printf("stereo: left peak bin %d, mono peak bin %d — ok\n", leftPeak, monoPeak);
     }
 
@@ -64,15 +71,15 @@ int main() {
         fft.setSmoothingTimeConstant(0.0f);
         std::vector<float> stereo(256, 0.5f);
         fft.processInterleaved(stereo.data(), 128, 2);
-        assert(fft.hasStereo());
+        REQUIRE(fft.hasStereo());
         std::vector<float> mono(128, 0.5f);
         fft.processInterleaved(mono.data(), 128, 1);
-        assert(!fft.hasStereo());
-        assert(fft.getChannels() == 1);
-        for (uint8_t v : fft.getLeftFrequencyData()) assert(v == 0);
-        for (uint8_t v : fft.getRightFrequencyData()) assert(v == 0);
-        for (uint8_t v : fft.getLeftTimeDomainData()) assert(v == 128);
-        for (uint8_t v : fft.getRightTimeDomainData()) assert(v == 128);
+        REQUIRE(!fft.hasStereo());
+        REQUIRE(fft.getChannels() == 1);
+        for (uint8_t v : fft.getLeftFrequencyData()) REQUIRE(v == 0);
+        for (uint8_t v : fft.getRightFrequencyData()) REQUIRE(v == 0);
+        for (uint8_t v : fft.getLeftTimeDomainData()) REQUIRE(v == 128);
+        for (uint8_t v : fft.getRightTimeDomainData()) REQUIRE(v == 128);
         std::printf("mono-after-stereo clears per-channel outputs — ok\n");
     }
 
@@ -88,9 +95,9 @@ int main() {
             quad[static_cast<size_t>(i) * 4 + 3] = -0.5f;
         }
         fft.processInterleaved(quad.data(), 128, 4);
-        assert(fft.hasStereo()); // >= 2 channels is a stereo frame
-        assert(fft.getLeftTimeDomainData()[0] == 191); // (0.5+1)*127.5
-        assert(fft.getRightTimeDomainData()[0] < 70);  // -0.5 -> ~63
+        REQUIRE(fft.hasStereo()); // >= 2 channels is a stereo frame
+        REQUIRE(fft.getLeftTimeDomainData()[0] == 191); // (0.5+1)*127.5
+        REQUIRE(fft.getRightTimeDomainData()[0] < 70);  // -0.5 -> ~63
         std::printf("quad: left[0]=%d right[0]=%d — ok\n",
                     fft.getLeftTimeDomainData()[0], fft.getRightTimeDomainData()[0]);
     }
@@ -98,9 +105,9 @@ int main() {
     // 4. Sample rate: unknown stays 0, never guessed.
     {
         FftProcessor fft;
-        assert(fft.getSampleRateHz() == 0);
+        REQUIRE(fft.getSampleRateHz() == 0);
         fft.setSampleRateHz(-44100);
-        assert(fft.getSampleRateHz() == 0);
+        REQUIRE(fft.getSampleRateHz() == 0);
         std::printf("sample rate unknown stays 0 — ok\n");
     }
 
