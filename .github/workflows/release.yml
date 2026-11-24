@@ -95,18 +95,21 @@ jobs:
           path: dist/
 
   build-macos:
-    name: Build macOS (arm64 Apple Silicon) & iOS
+    name: Build macOS (arm64 Apple Silicon)
     # macos-14 (Sonoma) no longer receives Homebrew bottles, so every brew
     # formula source-builds and python@3.15 fails to compile there.
     runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install build dependencies via Homebrew
         run: |
-          brew update
-          brew install cmake ninja meson pkg-config ffmpeg libass libplacebo nasm
+          brew install cmake ninja meson pkg-config ffmpeg libass libplacebo
 
       - name: Build Patched libmpv (arm64)
         run: |
@@ -137,23 +140,58 @@ jobs:
           cp build/bin/audio-engine staging/full/
           cp -P build/libmpv/darwin/* staging/full/
           tar -czf dist/audio-engine-macos-arm64.tar.gz -C staging/full .
+          cd dist && shasum -a 256 * > sha256-macos.txt
+
+      - name: Upload macOS Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-macos
+          path: dist/
+
+  build-ios:
+    name: Build iOS (xcframework & mpv.framework)
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools via Homebrew
+        run: |
+          brew install meson ninja pkg-config
+
+      - name: Cache prebuilt iOS mpv & FFmpeg SDKs
+        uses: actions/cache@v4
+        with:
+          path: staging/mobile-mpv/ios
+          key: ios-mpv-${{ github.event.inputs.mpv_version || 'v0.41.0' }}-${{ hashFiles('scripts/mpv-build/build-ios.sh', 'patches/mpv-pcm-tap.patch') }}
 
       - name: Build Genuine iOS mpv.framework
         env:
           MPV_VERSION: ${{ github.event.inputs.mpv_version || 'v0.41.0' }}
         run: |
-          bash scripts/mpv-build/build-ios.sh staging/mobile-mpv/ios/mpv.framework
+          if [ -f "staging/mobile-mpv/ios/mpv.framework/mpv" ] && \
+             [ -f "staging/mobile-mpv/ios/ffmpeg-sdk-device_arm64/lib/libavcodec.a" ] && \
+             [ -f "staging/mobile-mpv/ios/ffmpeg-sdk-sim_arm64/lib/libavcodec.a" ] && \
+             [ -f "staging/mobile-mpv/ios/ffmpeg-sdk-sim_x86_64/lib/libavcodec.a" ]; then
+            echo "Cache hit: reusing prebuilt iOS mpv.framework & FFmpeg SDKs."
+          else
+            bash scripts/mpv-build/build-ios.sh staging/mobile-mpv/ios/mpv.framework
+          fi
 
       - name: Build iOS BBeBeeAudioBridge.xcframework
         run: |
           bash scripts/fetch-mobile-mpv.sh ios
           bash scripts/build-ios-framework.sh
-          cd dist && shasum -a 256 * > sha256-macos.txt
+          cd dist && shasum -a 256 * > sha256-ios.txt
 
-      - name: Upload macOS & iOS Assets
+      - name: Upload iOS Assets
         uses: actions/upload-artifact@v4
         with:
-          name: assets-macos
+          name: assets-ios
           path: dist/
 
   build-windows:
@@ -228,8 +266,13 @@ jobs:
           path: dist/
 
   build-android:
-    name: Build Android JNI (arm64-v8a & x86_64)
+    name: Build Android JNI (${{ matrix.abi }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -243,7 +286,14 @@ jobs:
       - name: Install Android libmpv Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build meson pkg-config zip autoconf automake libtool
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build meson pkg-config zip autoconf automake libtool
+
+      - name: Cache prebuilt Android libmpv & FFmpeg SDK
+        uses: actions/cache@v4
+        with:
+          path: staging/mobile-mpv/android/${{ matrix.abi }}
+          key: android-mpv-${{ matrix.abi }}-${{ github.event.inputs.mpv_version || 'v0.41.0' }}-${{ hashFiles('scripts/mpv-build/build-android.sh', 'patches/mpv-pcm-tap.patch') }}
 
       # Order matters: the JNI bridge links libav statically from the FFmpeg
       # SDK that build-android.sh stages next to libmpv.so, so the mpv/FFmpeg
@@ -252,21 +302,25 @@ jobs:
       # their newest bundled NDK (27.x in the failing log), which would
       # otherwise silently override the r26b installed above — both here
       # (build-android.sh reads ANDROID_NDK_HOME first) and in the JNI step.
-      - name: Build Genuine libmpv + FFmpeg SDK for Android ABIs
+      - name: Build Genuine libmpv + FFmpeg SDK for Android ABI
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           MPV_VERSION: ${{ github.event.inputs.mpv_version || 'v0.41.0' }}
         run: |
-          for ABI in arm64-v8a x86_64; do
+          ABI="${{ matrix.abi }}"
+          if [ -f "staging/mobile-mpv/android/${ABI}/libmpv.so" ] && \
+             [ -f "staging/mobile-mpv/android/${ABI}/ffmpeg-sdk/lib/libavcodec.a" ]; then
+            echo "Cache hit: reusing prebuilt Android ${ABI} libmpv.so & FFmpeg SDK."
+          else
             echo "=== Compiling Genuine libmpv + FFmpeg SDK for ${ABI} ==="
             bash scripts/mpv-build/build-android.sh "${ABI}" "staging/mobile-mpv/android/${ABI}"
-            if [ ! -f "staging/mobile-mpv/android/${ABI}/ffmpeg-sdk/lib/libavcodec.a" ]; then
-              echo "ERROR: FFmpeg SDK missing for ${ABI} — JNI transcode support cannot be built!" >&2
-              exit 1
-            fi
-          done
+          fi
+          if [ ! -f "staging/mobile-mpv/android/${ABI}/ffmpeg-sdk/lib/libavcodec.a" ]; then
+            echo "ERROR: FFmpeg SDK missing for ${ABI} — JNI transcode support cannot be built!" >&2
+            exit 1
+          fi
 
-      - name: Compile JNI Libraries for Android ABIs
+      - name: Compile JNI Library for Android ABI
         run: |
           NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
           NDK_PATH="${NDK_PATH:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${ANDROID_NDK:-}}}}"
@@ -279,54 +333,52 @@ jobs:
             echo "ERROR: Toolchain file not found at ${TOOLCHAIN_FILE}"
             exit 1
           fi
-          for ABI in arm64-v8a x86_64; do
-            echo "=== Compiling JNI bridge (with libav transcode) for ${ABI} ==="
-            BUILD_DIR="build/android/${ABI}"
-            cmake -B "${BUILD_DIR}" -S engine/jni \
-              -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
-              -DANDROID_ABI="${ABI}" \
-              -DANDROID_PLATFORM=android-26 \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBEE_FFMPEG_SDK_DIR="$(pwd)/staging/mobile-mpv/android/${ABI}/ffmpeg-sdk"
-            cmake --build "${BUILD_DIR}" --config Release
-            SO_FILE=$(find "${BUILD_DIR}" -name "libbbebee_audio_jni.so" | head -n 1)
-            if [ -z "${SO_FILE}" ]; then
-              echo "ERROR: JNI .so missing for ${ABI}!" >&2
-              exit 1
-            fi
-            if ! "${NDK_PATH}/toolchains/llvm/prebuilt/"*/bin/llvm-nm -D --defined-only "${SO_FILE}" | grep -q "nativeTranscode"; then
-              echo "ERROR: libbbebee_audio_jni.so for ${ABI} lacks the transcode exports — HAVE_LIBAV did not link!" >&2
-              exit 1
-            fi
-          done
+          ABI="${{ matrix.abi }}"
+          echo "=== Compiling JNI bridge (with libav transcode) for ${ABI} ==="
+          BUILD_DIR="build/android/${ABI}"
+          cmake -B "${BUILD_DIR}" -S engine/jni \
+            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBEE_FFMPEG_SDK_DIR="$(pwd)/staging/mobile-mpv/android/${ABI}/ffmpeg-sdk"
+          cmake --build "${BUILD_DIR}" --config Release
+          SO_FILE=$(find "${BUILD_DIR}" -name "libbbebee_audio_jni.so" | head -n 1)
+          if [ -z "${SO_FILE}" ]; then
+            echo "ERROR: JNI .so missing for ${ABI}!" >&2
+            exit 1
+          fi
+          if ! "${NDK_PATH}/toolchains/llvm/prebuilt/"*/bin/llvm-nm -D --defined-only "${SO_FILE}" | grep -q "nativeTranscode"; then
+            echo "ERROR: libbbebee_audio_jni.so for ${ABI} lacks the transcode exports — HAVE_LIBAV did not link!" >&2
+            exit 1
+          fi
 
-      - name: Package Android Archives
+      - name: Package Android Archive
         run: |
-          bash scripts/fetch-mobile-mpv.sh android
+          ABI="${{ matrix.abi }}"
+          bash scripts/fetch-mobile-mpv.sh "android-${ABI}"
           mkdir -p dist
-          for ABI in arm64-v8a x86_64; do
-            STAGE="staging/android/${ABI}"
-            mkdir -p "${STAGE}"
-            SO_FILE=$(find "build/android/${ABI}" -name "libbbebee_audio_jni.so" | head -n 1)
-            cp "${SO_FILE}" "${STAGE}/"
-            if [ ! -f "staging/mobile-mpv/android/${ABI}/libmpv.so" ]; then
-              echo "ERROR: Genuine libmpv.so missing for ${ABI}!" >&2
-              exit 1
-            fi
-            cp "staging/mobile-mpv/android/${ABI}/libmpv.so" "${STAGE}/"
-            (cd "${STAGE}" && zip -r "../../../dist/audio-engine-android-${ABI}.zip" .)
-          done
-          cd dist && sha256sum *.zip > sha256-android.txt
+          STAGE="staging/android/${ABI}"
+          mkdir -p "${STAGE}"
+          SO_FILE=$(find "build/android/${ABI}" -name "libbbebee_audio_jni.so" | head -n 1)
+          cp "${SO_FILE}" "${STAGE}/"
+          if [ ! -f "staging/mobile-mpv/android/${ABI}/libmpv.so" ]; then
+            echo "ERROR: Genuine libmpv.so missing for ${ABI}!" >&2
+            exit 1
+          fi
+          cp "staging/mobile-mpv/android/${ABI}/libmpv.so" "${STAGE}/"
+          (cd "${STAGE}" && zip -r "../../../dist/audio-engine-android-${ABI}.zip" .)
+          cd dist && sha256sum *.zip > "sha256-android-${ABI}.txt"
 
       - name: Upload Android Assets
         uses: actions/upload-artifact@v4
         with:
-          name: assets-android
+          name: assets-android-${{ matrix.abi }}
           path: dist/
 
   publish-release:
     name: Publish Release & Aggregated Checksums
-    needs: [build-linux, build-macos, build-windows, build-android]
+    needs: [build-linux, build-macos, build-ios, build-windows, build-android]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

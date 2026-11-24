@@ -108,6 +108,16 @@ extract_tarball() {
   tar -xz -C "${dest}" --strip-components=1 -f "${file}"
 }
 
+copy_src_tree() {
+  local src="$1"
+  local dst="$2"
+  rm -rf "${dst}"
+  if ! cp -cR "${src}" "${dst}" 2>/dev/null; then
+    rm -rf "${dst}"
+    cp -R "${src}" "${dst}"
+  fi
+}
+
 echo "=========================================================="
 echo " BBeBee iOS Real mpv Builder"
 echo "=========================================================="
@@ -145,6 +155,7 @@ build_slice() {
   local sdk_name="$3"
   local sdk_path="$4"
   local min_ver_flag="$5"
+  local build_mpv="${6:-1}"
 
   echo "=== Building slice: ${slice_name} (${arch} for ${sdk_name}) ==="
   local slice_prefix="${WORK_DIR}/prefix_${slice_name}"
@@ -288,12 +299,11 @@ CROSSFILE
   # 1. Build FFmpeg for this iOS slice
   echo "--- [2/7] Compiling FFmpeg for ${slice_name} ---"
   local ffmpeg_build="${WORK_DIR}/ffmpeg_${slice_name}"
-  mkdir -p "${ffmpeg_build}"
   if [ ! -d "${WORK_DIR}/ffmpeg-src" ]; then
     git clone --depth 1 --branch "${FFMPEG_VERSION}" https://github.com/FFmpeg/FFmpeg.git "${WORK_DIR}/ffmpeg-src"
     verify_git_head "${WORK_DIR}/ffmpeg-src" "${FFMPEG_COMMIT}"
   fi
-  cp -r "${WORK_DIR}/ffmpeg-src"/* "${ffmpeg_build}/"
+  copy_src_tree "${WORK_DIR}/ffmpeg-src" "${ffmpeg_build}"
 
   local extra_ff_args=""
   [ "${arch}" = "x86_64" ] && extra_ff_args="--disable-x86asm"
@@ -367,15 +377,58 @@ CROSSFILE
     make install
   )
 
+  # Stage the FFmpeg SDK for the bridge transcode build. The whole
+  # prefix lives under WORK_DIR, which `trap cleanup EXIT` deletes,
+  # so — mirroring Android's step 11 — the headers and static archives
+  # the bridge links must outlive this script. Consumers (see
+  # scripts/build-ios-framework.sh) find them at
+  #   staging/mobile-mpv/ios/ffmpeg-sdk-<slice_name>/
+  # next to the mpv.framework target.
+  echo "=== Staging FFmpeg SDK for bridge transcode linking (${slice_name}) ==="
+  local sdk_out_dir="${ROOT_DIR}/staging/mobile-mpv/ios/ffmpeg-sdk-${slice_name}"
+  rm -rf "${sdk_out_dir}"
+  mkdir -p "${sdk_out_dir}/include" "${sdk_out_dir}/lib"
+  local hdr lib sdk_libs=""
+  for hdr in libavcodec libavformat libavutil libswresample lame opus vorbis ogg; do
+    if [ -d "${slice_prefix}/include/${hdr}" ]; then
+      cp -R "${slice_prefix}/include/${hdr}" "${sdk_out_dir}/include/"
+    fi
+  done
+  for lib in libavcodec libavformat libavutil libswresample libswscale \
+             libmp3lame libopus libvorbis libvorbisenc libvorbisfile libogg; do
+    if [ -f "${slice_prefix}/lib/${lib}.a" ]; then
+      cp -L "${slice_prefix}/lib/${lib}.a" "${sdk_out_dir}/lib/"
+      sdk_libs="${sdk_libs} ${lib}.a"
+    fi
+  done
+  if [ ! -f "${sdk_out_dir}/lib/libavcodec.a" ]; then
+    echo "ERROR: FFmpeg SDK staging failed — ${sdk_out_dir}/lib/libavcodec.a missing!" >&2
+    exit 1
+  fi
+  cat > "${sdk_out_dir}/BUILD_INFO.txt" <<EOF
+FFmpeg: ${FFMPEG_VERSION}
+LAME: ${LAME_VERSION}
+libogg: ${LIBOGG_VERSION}
+libvorbis: ${LIBVORBIS_VERSION}
+libopus: ${LIBOPUS_VERSION}
+Slice: ${slice_name}
+Staged archives:${sdk_libs}
+EOF
+  echo "FFmpeg SDK staged at ${sdk_out_dir}:${sdk_libs}"
+
+  if [ "${build_mpv}" != "1" ]; then
+    echo "--- Skipping mpv/render deps for ${slice_name} (FFmpeg SDK only) ---"
+    return 0
+  fi
+
   # 2. Build FreeType for this iOS slice
   echo "--- [3/7] Compiling FreeType for ${slice_name} ---"
   local freetype_build="${WORK_DIR}/freetype_${slice_name}"
-  mkdir -p "${freetype_build}"
   if [ ! -d "${WORK_DIR}/freetype-src" ]; then
     git clone --depth 1 --branch "${FREETYPE_VERSION}" https://github.com/freetype/freetype.git "${WORK_DIR}/freetype-src"
     verify_git_head "${WORK_DIR}/freetype-src" "${FREETYPE_COMMIT}"
   fi
-  cp -r "${WORK_DIR}/freetype-src"/* "${freetype_build}/"
+  copy_src_tree "${WORK_DIR}/freetype-src" "${freetype_build}"
 
   (
     cd "${freetype_build}"
@@ -396,12 +449,11 @@ CROSSFILE
   # 3. Build FriBidi for this iOS slice
   echo "--- [4/7] Compiling FriBidi for ${slice_name} ---"
   local fribidi_build="${WORK_DIR}/fribidi_${slice_name}"
-  mkdir -p "${fribidi_build}"
   if [ ! -d "${WORK_DIR}/fribidi-src" ]; then
     git clone --depth 1 --branch "${FRIBIDI_VERSION}" https://github.com/fribidi/fribidi.git "${WORK_DIR}/fribidi-src"
     verify_git_head "${WORK_DIR}/fribidi-src" "${FRIBIDI_COMMIT}"
   fi
-  cp -r "${WORK_DIR}/fribidi-src"/* "${fribidi_build}/"
+  copy_src_tree "${WORK_DIR}/fribidi-src" "${fribidi_build}"
 
   (
     cd "${fribidi_build}"
@@ -419,12 +471,11 @@ CROSSFILE
   # 4. Build HarfBuzz for this iOS slice
   echo "--- [5/7] Compiling HarfBuzz for ${slice_name} ---"
   local harfbuzz_build="${WORK_DIR}/harfbuzz_${slice_name}"
-  mkdir -p "${harfbuzz_build}"
   if [ ! -d "${WORK_DIR}/harfbuzz-src" ]; then
     git clone --depth 1 --branch "${HARFBUZZ_VERSION}" https://github.com/harfbuzz/harfbuzz.git "${WORK_DIR}/harfbuzz-src"
     verify_git_head "${WORK_DIR}/harfbuzz-src" "${HARFBUZZ_COMMIT}"
   fi
-  cp -r "${WORK_DIR}/harfbuzz-src"/* "${harfbuzz_build}/"
+  copy_src_tree "${WORK_DIR}/harfbuzz-src" "${harfbuzz_build}"
 
   (
     cd "${harfbuzz_build}"
@@ -452,12 +503,11 @@ CROSSFILE
   # 5. Build libass for this iOS slice
   echo "--- [6/7] Compiling libass for ${slice_name} ---"
   local libass_build="${WORK_DIR}/libass_${slice_name}"
-  mkdir -p "${libass_build}"
   if [ ! -d "${WORK_DIR}/libass-src" ]; then
     git clone --depth 1 --branch "${LIBASS_VERSION}" https://github.com/libass/libass.git "${WORK_DIR}/libass-src"
     verify_git_head "${WORK_DIR}/libass-src" "${LIBASS_COMMIT}"
   fi
-  cp -r "${WORK_DIR}/libass-src"/* "${libass_build}/"
+  copy_src_tree "${WORK_DIR}/libass-src" "${libass_build}"
 
   (
     cd "${libass_build}"
@@ -480,12 +530,11 @@ CROSSFILE
   # 6. Build libplacebo for this iOS slice
   echo "--- [7/7] Compiling libplacebo for ${slice_name} ---"
   local libplacebo_build="${WORK_DIR}/libplacebo_${slice_name}"
-  mkdir -p "${libplacebo_build}"
   if [ ! -d "${WORK_DIR}/libplacebo-src" ]; then
     git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${LIBPLACEBO_VERSION}" https://github.com/haasn/libplacebo.git "${WORK_DIR}/libplacebo-src"
     verify_git_head "${WORK_DIR}/libplacebo-src" "${LIBPLACEBO_COMMIT}"
   fi
-  cp -r "${WORK_DIR}/libplacebo-src"/* "${libplacebo_build}/"
+  copy_src_tree "${WORK_DIR}/libplacebo-src" "${libplacebo_build}"
 
   (
     cd "${libplacebo_build}"
@@ -513,7 +562,6 @@ CROSSFILE
   # 7. Build mpv for this iOS slice
   echo "--- Compiling Patched mpv for ${slice_name} ---"
   local mpv_build="${WORK_DIR}/mpv_${slice_name}"
-  mkdir -p "${mpv_build}"
   if [ ! -d "${WORK_DIR}/mpv-src" ]; then
     git clone --depth 1 --branch "${MPV_VERSION}" https://github.com/mpv-player/mpv.git "${WORK_DIR}/mpv-src"
     verify_git_head "${WORK_DIR}/mpv-src" "${MPV_COMMIT}"
@@ -532,7 +580,7 @@ CROSSFILE
       sed -i.bak "s|'-L/usr/lib', '-L/usr/local/lib'||g" meson.build
     )
   fi
-  cp -r "${WORK_DIR}/mpv-src"/* "${mpv_build}/"
+  copy_src_tree "${WORK_DIR}/mpv-src" "${mpv_build}"
 
   local cross_file="${WORK_DIR}/crossfile_${slice_name}.txt"
   cat << CROSSFILE > "${cross_file}"
@@ -654,60 +702,13 @@ CROSSFILE
     chmod 0755 "${WORK_DIR}/binaries/mpv_${slice_name}"
     install_name_tool -id "@rpath/mpv.framework/mpv" "${WORK_DIR}/binaries/mpv_${slice_name}" 2>/dev/null || true
   )
-
-  # Stage the FFmpeg SDK for the bridge transcode build. The whole
-  # prefix lives under WORK_DIR, which `trap cleanup EXIT` deletes,
-  # so — mirroring Android's step 11 — the headers and static archives
-  # the bridge links must outlive this script. Consumers (see
-  # scripts/build-ios-framework.sh) find them at
-  #   staging/mobile-mpv/ios/ffmpeg-sdk-<slice_name>/
-  # next to the mpv.framework target.
-  echo "=== Staging FFmpeg SDK for bridge transcode linking (${slice_name}) ==="
-  local sdk_out_dir="${ROOT_DIR}/staging/mobile-mpv/ios/ffmpeg-sdk-${slice_name}"
-  rm -rf "${sdk_out_dir}"
-  mkdir -p "${sdk_out_dir}/include" "${sdk_out_dir}/lib"
-  local hdr lib sdk_libs=""
-  for hdr in libavcodec libavformat libavutil libswresample lame opus vorbis ogg; do
-    if [ -d "${slice_prefix}/include/${hdr}" ]; then
-      cp -R "${slice_prefix}/include/${hdr}" "${sdk_out_dir}/include/"
-    fi
-  done
-  for lib in libavcodec libavformat libavutil libswresample libswscale \
-             libmp3lame libopus libvorbis libvorbisenc libvorbisfile libogg; do
-    if [ -f "${slice_prefix}/lib/${lib}.a" ]; then
-      cp -L "${slice_prefix}/lib/${lib}.a" "${sdk_out_dir}/lib/"
-      sdk_libs="${sdk_libs} ${lib}.a"
-    fi
-  done
-  if [ ! -f "${sdk_out_dir}/lib/libavcodec.a" ]; then
-    echo "ERROR: FFmpeg SDK staging failed — ${sdk_out_dir}/lib/libavcodec.a missing!" >&2
-    exit 1
-  fi
-  cat > "${sdk_out_dir}/BUILD_INFO.txt" <<EOF
-FFmpeg: ${FFMPEG_VERSION}
-LAME: ${LAME_VERSION}
-libogg: ${LIBOGG_VERSION}
-libvorbis: ${LIBVORBIS_VERSION}
-libopus: ${LIBOPUS_VERSION}
-Slice: ${slice_name}
-Staged archives:${sdk_libs}
-EOF
-  echo "FFmpeg SDK staged at ${sdk_out_dir}:${sdk_libs}"
 }
 
-# Build the 3 standard iOS slices
-build_slice "device_arm64" "arm64" "iphoneos" "${IPHONEOS_SDK}" "-miphoneos-version-min=16.0"
-build_slice "sim_arm64" "arm64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=16.0"
-build_slice "sim_x86_64" "x86_64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=16.0"
-
-# Combine simulator slices into universal binary
-echo "=== Creating Universal Simulator mpv Binary ==="
-lipo -create \
-  "${WORK_DIR}/binaries/mpv_sim_arm64" \
-  "${WORK_DIR}/binaries/mpv_sim_x86_64" \
-  -output "${WORK_DIR}/binaries/mpv_simulator"
-chmod 0755 "${WORK_DIR}/binaries/mpv_simulator" 2>/dev/null || true
-install_name_tool -id "@rpath/mpv.framework/mpv" "${WORK_DIR}/binaries/mpv_simulator" 2>/dev/null || true
+# Build device mpv + FFmpeg SDK; simulator slices only need FFmpeg SDKs for
+# BBeBeeAudioBridge.xcframework because mpv.framework ships the device arm64 binary.
+build_slice "device_arm64" "arm64" "iphoneos" "${IPHONEOS_SDK}" "-miphoneos-version-min=16.0" "1"
+build_slice "sim_arm64" "arm64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=16.0" "0"
+build_slice "sim_x86_64" "x86_64" "iphonesimulator" "${IPHONESIM_SDK}" "-mios-simulator-version-min=16.0" "0"
 
 # Assemble target mpv.framework
 echo "=== Assembling Authentic mpv.framework ==="

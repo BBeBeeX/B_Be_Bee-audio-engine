@@ -307,6 +307,12 @@ case "${PLATFORM}" in
     stage_android "arm64-v8a"
     stage_android "x86_64"
     ;;
+  android-arm64-v8a|arm64-v8a)
+    stage_android "arm64-v8a"
+    ;;
+  android-x86_64|x86_64)
+    stage_android "x86_64"
+    ;;
   ios)
     stage_ios
     ;;
@@ -316,7 +322,7 @@ case "${PLATFORM}" in
     stage_ios
     ;;
   *)
-    echo "Unknown platform: ${PLATFORM}. Valid options: all, android, ios" >&2
+    echo "Unknown platform: ${PLATFORM}. Valid options: all, android, android-arm64-v8a, android-x86_64, ios" >&2
     exit 1
     ;;
 esac
