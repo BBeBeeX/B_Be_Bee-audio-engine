@@ -51,12 +51,45 @@ else
 fi
 
 echo "Configuring build with Meson..."
+# Disable non-audio / unused mpv features to speed up macOS builds and shrink
+# the bundled dylib closure. Keep cocoa/gl untouched because mpv v0.41.0 links
+# dangling ra_is_gl references when gl=disabled.
 meson setup build \
     --buildtype=release \
     -Ddefault_library=shared \
     -Dlibmpv=true \
     -Dcplayer=false \
     -Dcoreaudio=enabled \
+    -Daudiounit=disabled \
+    -Dmacos-media-player=disabled \
+    -Dmacos-touchbar=disabled \
+    -Dlua=disabled \
+    -Djavascript=disabled \
+    -Duchardet=disabled \
+    -Dlibavdevice=disabled \
+    -Dvulkan=disabled \
+    -Dshaderc=disabled \
+    -Dspirv-cross=disabled \
+    -Dsdl2-video=disabled \
+    -Dsdl2-audio=disabled \
+    -Djack=disabled \
+    -Doss-audio=disabled \
+    -Dsndio=disabled \
+    -Dlibbluray=disabled \
+    -Ddvdnav=disabled \
+    -Dcdda=disabled \
+    -Ddvbin=disabled \
+    -Drubberband=disabled \
+    -Dvapoursynth=disabled \
+    -Dzimg=disabled \
+    -Dcaca=disabled \
+    -Dsixel=disabled \
+    -Djpeg=disabled \
+    -Dlibarchive=disabled \
+    -Dlcms2=disabled \
+    -Dmanpage-build=disabled \
+    -Dhtml-build=disabled \
+    -Dpdf-build=disabled \
     -Dc_args='-Wno-deprecated-declarations -DGL_SILENCE_DEPRECATION'
 
 echo "Compiling libmpv with Ninja..."
@@ -167,6 +200,27 @@ bundle_macos_deps() {
 }
 
 bundle_macos_deps "${TARGET_DIR}"
+
+LIBMPV_FILE="$(find "${TARGET_DIR}" -maxdepth 1 -name 'libmpv*.dylib' ! -type l | head -n 1 || true)"
+if [ -z "${LIBMPV_FILE}" ] || [ ! -f "${LIBMPV_FILE}" ]; then
+    echo "ERROR: libmpv dylib not found in ${TARGET_DIR}" >&2
+    exit 1
+fi
+
+if command -v nm >/dev/null 2>&1; then
+    NM_SYMS="$(nm -gU "${LIBMPV_FILE}" 2>/dev/null || true)"
+    if grep -q "mpv_set_pcm_callback$" <<< "${NM_SYMS}"; then
+        echo "  [OK] Verified symbol: mpv_set_pcm_callback"
+    else
+        echo "ERROR: Required symbol 'mpv_set_pcm_callback' missing from ${LIBMPV_FILE}!" >&2
+        exit 1
+    fi
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import ctypes, os, sys; lib = ctypes.CDLL(sys.argv[1], mode=getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_LOCAL", 0)); getattr(lib, "mpv_set_pcm_callback")' "${LIBMPV_FILE}"
+    echo "  [OK] Verified dlopen(RTLD_NOW | RTLD_LOCAL) and mpv_set_pcm_callback lookup"
+fi
 
 echo "=== Patched libmpv successfully generated for macOS ==="
 ls -la "${TARGET_DIR}/"

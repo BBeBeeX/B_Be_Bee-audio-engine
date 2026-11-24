@@ -55,6 +55,9 @@ else
 fi
 
 echo "Configuring build with Meson..."
+# Disable non-audio / unused mpv features to speed up Linux builds and shrink
+# the transitive .so closure. Keep gl/x11/wayland/drm/gbm/egl untouched because
+# mpv v0.41.0 links dangling ra_is_gl references when gl=disabled.
 meson setup build \
     --buildtype=release \
     -Ddefault_library=shared \
@@ -63,6 +66,33 @@ meson setup build \
     -Dpulse=enabled \
     -Dalsa=enabled \
     -Dpipewire=enabled \
+    -Dlua=disabled \
+    -Djavascript=disabled \
+    -Duchardet=disabled \
+    -Dlibavdevice=disabled \
+    -Dvulkan=disabled \
+    -Dshaderc=disabled \
+    -Dspirv-cross=disabled \
+    -Dsdl2-video=disabled \
+    -Dsdl2-audio=disabled \
+    -Djack=disabled \
+    -Doss-audio=disabled \
+    -Dsndio=disabled \
+    -Dlibbluray=disabled \
+    -Ddvdnav=disabled \
+    -Dcdda=disabled \
+    -Ddvbin=disabled \
+    -Drubberband=disabled \
+    -Dvapoursynth=disabled \
+    -Dzimg=disabled \
+    -Dcaca=disabled \
+    -Dsixel=disabled \
+    -Djpeg=disabled \
+    -Dlibarchive=disabled \
+    -Dlcms2=disabled \
+    -Dmanpage-build=disabled \
+    -Dhtml-build=disabled \
+    -Dpdf-build=disabled \
     -Dc_args='-Wno-deprecated-declarations'
 
 echo "Compiling libmpv with Ninja..."
@@ -118,6 +148,30 @@ else
     # system ffmpeg. CI installs patchelf; without it the build fails.
     echo "ERROR: patchelf not found - staged libmpv closure would NOT load on machines without system ffmpeg (install patchelf: sudo apt-get install patchelf)." >&2
     exit 1
+fi
+
+LIBMPV_FILE="${TARGET_DIR}/libmpv.so.2"
+if [ ! -f "${LIBMPV_FILE}" ]; then
+    LIBMPV_FILE="$(find "${TARGET_DIR}" -maxdepth 1 -name 'libmpv.so*' -type f | head -n 1 || true)"
+fi
+if [ -z "${LIBMPV_FILE}" ] || [ ! -f "${LIBMPV_FILE}" ]; then
+    echo "ERROR: libmpv shared library not found in ${TARGET_DIR}" >&2
+    exit 1
+fi
+
+if command -v nm >/dev/null 2>&1; then
+    NM_SYMS="$(nm -D --defined-only "${LIBMPV_FILE}" 2>/dev/null || true)"
+    if grep -q "[[:space:]]mpv_set_pcm_callback$" <<< "${NM_SYMS}"; then
+        echo "  [OK] Verified symbol: mpv_set_pcm_callback"
+    else
+        echo "ERROR: Required symbol 'mpv_set_pcm_callback' missing from ${LIBMPV_FILE}!" >&2
+        exit 1
+    fi
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import ctypes, os, sys; lib = ctypes.CDLL(sys.argv[1], mode=getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_LOCAL", 0)); getattr(lib, "mpv_set_pcm_callback")' "${LIBMPV_FILE}"
+    echo "  [OK] Verified dlopen(RTLD_NOW | RTLD_LOCAL) and mpv_set_pcm_callback lookup"
 fi
 
 echo "=== Patched libmpv successfully generated for Linux ==="

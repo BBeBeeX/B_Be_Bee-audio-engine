@@ -30,6 +30,7 @@ jobs:
   build-linux:
     name: Build Linux (x86_64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,11 +43,11 @@ jobs:
       - name: Install build toolchain & dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build meson pkg-config patchelf python3 \
-            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build meson pkg-config patchelf python3 pigz \
+            libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
             libswresample-dev libswscale-dev libass-dev libplacebo-dev \
-            libasound2-dev libpulse-dev libpipewire-0.3-dev libluajit-5.1-dev libuchardet-dev
+            libasound2-dev libpulse-dev libpipewire-0.3-dev
 
       - name: Build Patched libmpv
         run: |
@@ -61,7 +62,7 @@ jobs:
 
       - name: Run engine tests
         run: |
-          ctest --test-dir build/engine --output-on-failure
+          ctest --test-dir build/engine --output-on-failure --timeout 60
 
       - name: Package Full and Slim Archives
         run: |
@@ -78,12 +79,12 @@ jobs:
           # Full package (engine + libmpv + transitive dependencies)
           cp build/bin/audio-engine staging/full/
           cp -P build/libmpv/linux/* staging/full/
-          tar -czf dist/audio-engine-linux-x64.tar.gz -C staging/full .
+          tar -I pigz -cf dist/audio-engine-linux-x64.tar.gz -C staging/full .
 
           # Slim package (engine + libmpv only)
           cp build/bin/audio-engine staging/slim/
           cp -P build/libmpv/linux/libmpv.so* staging/slim/
-          tar -czf dist/audio-engine-linux-x64-slim.tar.gz -C staging/slim .
+          tar -I pigz -cf dist/audio-engine-linux-x64-slim.tar.gz -C staging/slim .
 
           cd dist && sha256sum *.tar.gz > sha256-linux.txt
 
@@ -105,7 +106,7 @@ jobs:
       - name: Install build dependencies via Homebrew
         run: |
           brew update
-          brew install cmake ninja meson pkg-config ffmpeg libass libplacebo uchardet luajit nasm
+          brew install cmake ninja meson pkg-config ffmpeg libass libplacebo nasm
 
       - name: Build Patched libmpv (arm64)
         run: |
@@ -120,7 +121,7 @@ jobs:
 
       - name: Run engine tests
         run: |
-          ctest --test-dir build/engine --output-on-failure
+          ctest --test-dir build/engine --output-on-failure --timeout 60
 
       - name: Package macOS Archive
         run: |
@@ -186,7 +187,6 @@ jobs:
             mingw-w64-ucrt-x86_64-ffmpeg
             mingw-w64-ucrt-x86_64-libass
             mingw-w64-ucrt-x86_64-libplacebo
-            mingw-w64-ucrt-x86_64-uchardet
             zip
 
       - name: Build Patched libmpv & audio-engine

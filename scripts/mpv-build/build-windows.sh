@@ -55,6 +55,9 @@ else
 fi
 
 echo "Configuring build with Meson..."
+# Disable non-audio / unused mpv features to speed up Windows builds and shrink
+# the bundled DLL closure. Keep gl/Direct3D/win32 untouched because mpv v0.41.0
+# links dangling ra_is_gl references when gl=disabled.
 meson setup build \
     --buildtype=release \
     -Ddefault_library=shared \
@@ -62,6 +65,32 @@ meson setup build \
     -Dcplayer=false \
     -Dwasapi=enabled \
     -Dlua=disabled \
+    -Djavascript=disabled \
+    -Duchardet=disabled \
+    -Dlibavdevice=disabled \
+    -Dvulkan=disabled \
+    -Dshaderc=disabled \
+    -Dspirv-cross=disabled \
+    -Dsdl2-video=disabled \
+    -Dsdl2-audio=disabled \
+    -Djack=disabled \
+    -Doss-audio=disabled \
+    -Dsndio=disabled \
+    -Dlibbluray=disabled \
+    -Ddvdnav=disabled \
+    -Dcdda=disabled \
+    -Ddvbin=disabled \
+    -Drubberband=disabled \
+    -Dvapoursynth=disabled \
+    -Dzimg=disabled \
+    -Dcaca=disabled \
+    -Dsixel=disabled \
+    -Djpeg=disabled \
+    -Dlibarchive=disabled \
+    -Dlcms2=disabled \
+    -Dmanpage-build=disabled \
+    -Dhtml-build=disabled \
+    -Dpdf-build=disabled \
     -Dc_args='-Wno-deprecated-declarations'
 # -Dlua=disabled is load-bearing, not cosmetic: the engine talks to
 # libmpv only through the C API and never loads mpv scripts, so Lua
@@ -198,6 +227,16 @@ bundle_windows_deps() {
 }
 
 bundle_windows_deps "${TARGET_DIR}"
+
+if command -v objdump >/dev/null 2>&1; then
+    EXPORT_DUMP="$(objdump -p "${TARGET_DIR}/libmpv-2.dll" 2>/dev/null || true)"
+    if grep -q "mpv_set_pcm_callback" <<< "${EXPORT_DUMP}"; then
+        echo "  [OK] Verified symbol: mpv_set_pcm_callback"
+    else
+        echo "ERROR: Required symbol 'mpv_set_pcm_callback' missing from ${TARGET_DIR}/libmpv-2.dll!" >&2
+        exit 1
+    fi
+fi
 
 echo "=== Patched libmpv successfully generated for Windows ==="
 ls -la "${TARGET_DIR}/"
